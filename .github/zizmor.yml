@@ -1,0 +1,19 @@
+rules:
+  unpinned-uses:
+    ignore:
+      # RAPIDS fork does not run these workflows
+      - snap.yml
+      - close-snap.yml
+      - benchmarks.yml
+  excessive-permissions:
+    ignore:
+      # RAPIDS fork does not run these workflows
+      - snap.yml
+      - close-snap.yml
+      - benchmarks.yml
+  artipacked:
+    ignore:
+      # RAPIDS fork does not run these workflows
+      - snap.yml
+      - close-snap.yml
+      - benchmarks.yml

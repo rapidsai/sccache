@@ -15,6 +15,7 @@ runs:
       shell: bash --noprofile --norc -eo pipefail {0}
       env:
         TIMEFORMAT: 'time: %3lR'
+        INPUTS_TOOL_CACHE: ${{ inputs.tool_cache }}
       run: |
         _run_cmd() {
           time sudo -s /bin/bash -cx "$@"
@@ -33,4 +34,4 @@ runs:
         # _run_cmd 'rm -rf /usr/local/lib/android'
         _run_cmd 'rm -rf /usr/local/share/{boost,chromium,powershell}'
         _run_cmd 'rm -rf /home/linuxbrew/.linuxbrew'
-        _run_cmd 'rm -rf "${{ inputs.tool_cache }}"/{go,Ruby,PyPy,CodeQL,Python}'
+        _run_cmd 'rm -rf "${INPUTS_TOOL_CACHE}"/{go,Ruby,PyPy,CodeQL,Python}'
