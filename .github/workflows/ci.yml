@@ -34,6 +34,8 @@ jobs:
     steps:
       - name: Clone repository
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          persist-credentials: false
 
       - name: Install rust
         uses: ./.github/actions/rust-toolchain
@@ -57,6 +59,8 @@ jobs:
     steps:
       - name: Clone repository
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          persist-credentials: false
 
       - name: Check feature ${{ matrix.feature }}
         run: cargo check --no-default-features --features ${{ matrix.feature }}
@@ -66,6 +70,8 @@ jobs:
     steps:
       - name: Clone repository
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          persist-credentials: false
 
       - name: Check
         run: npx --yes @taplo/cli fmt --check
@@ -192,6 +198,8 @@ jobs:
 
       - name: Clone repository
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          persist-credentials: false
 
       - if: ${{ contains(matrix.os, 'ubuntu') }}
         name: Free up disk space
@@ -303,7 +311,7 @@ jobs:
 
       - name: Upload coverage results (to Codecov.io)
         if: ${{ needs.checks.outputs.has-codecov-token == 'true' && matrix.no_coverage != 'true' }}
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@5975040f7f7d40edaff8d784b576fd65ae95c073 # v5.5.5
         with:
           files: ${{ steps.coverage.outputs.report }}
           ## flags: IntegrationTests, UnitTests, ${{ steps.vars.outputs.CODECOV_FLAGS }}
@@ -376,6 +384,8 @@ jobs:
     steps:
       - name: Clone repository
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          persist-credentials: false
 
       - name: Install rust
         uses: ./.github/actions/rust-toolchain
@@ -461,6 +471,8 @@ jobs:
           - { os: ubuntu-22.04 }
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          persist-credentials: false
       - name: Prepare, build and test
         uses: vmactions/freebsd-vm@966989c456d41351f095a421f60e71342d3bce41
         with:
@@ -520,6 +532,8 @@ jobs:
     steps:
       - name: Clone repository
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          persist-credentials: false
 
       - name: Check versions
         run: |
