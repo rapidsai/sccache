@@ -269,11 +269,6 @@ jobs:
           echo '[env]
           LLVM_PROFILE_FILE = { value = "target/debug/coverage/default-%p-%8m.profraw", relative = true }' >> .cargo/config.toml
 
-      - name: Create sccache-dist toolchain cache key
-        if: ${{ contains(matrix.extra_desc, 'dist-tests') }}
-        run: |
-          echo "TOOLCHAIN_CACHE_KEY=${{github.run_id}}-${{github.run_attempt}}-$RANDOM" | tee -a "$GITHUB_ENV"
-
       - if: ${{ matrix.cuda != '' && runner.os == 'Linux' }}
         name: Free disk space for CUDA tests
         run: |

@@ -56,6 +56,7 @@ impl Storage for MockStorage {
         if let Some(delay) = self.delay {
             sleep(delay).await;
         }
+        #[allow(deprecated)]
         let next = match self.rx.lock().await.try_next() {
             Ok(next) => next,
             Err(_) => return Ok(Cache::Miss),
@@ -84,6 +85,7 @@ impl Storage for MockStorage {
         if let Some(delay) = self.delay {
             sleep(delay).await;
         }
+        #[allow(deprecated)]
         let next = self.rx.lock().await.try_next().unwrap();
         if let Some(Ok(Cache::Hit(next))) = next {
             return Ok(next.len() as u64);

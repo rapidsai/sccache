@@ -125,7 +125,7 @@ pub fn compiler_version(exe: &std::path::Path) -> crate::errors::Result<String> 
 
     let cwd = env::current_dir()?;
     let runtime = Runtime::new()?;
-    let jobserver = Client::new();
+    let jobserver = Client::new_num(1);
     let creator = ProcessCommandCreator::new(&jobserver);
     let handle = runtime.handle().clone();
     runtime.block_on(async move {

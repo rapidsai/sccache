@@ -89,7 +89,6 @@ pub struct Nvcc {
     pub archs_native: Vec<String>,
     pub host_compiler: NvccHostCompiler,
     pub host_compiler_version: Option<String>,
-    pub specfiles: Vec<PathBuf>,
     pub version: Option<String>,
 }
 
@@ -339,11 +338,6 @@ impl CCompilerImpl for Nvcc {
                 if input.exists() {
                     parsed_args.input = dunce::canonicalize(input).unwrap();
                 }
-
-                // Include gcc's implicit specfiles in the object hash
-                parsed_args
-                    .extra_hash_files
-                    .extend(self.specfiles.iter().cloned());
 
                 // Use the object dir as the `out_dir` if the compile flags include `-c` and `-objtemp`
                 if matches!(compile_flag, NvccCompileFlag::Device)
@@ -2695,7 +2689,6 @@ mod test {
             archs_native: vec![],
             host_compiler: NvccHostCompiler::Gcc,
             host_compiler_version: None,
-            specfiles: vec![],
             version: None,
         }
         .parse_arguments(&arguments, ".".as_ref(), &[])
@@ -2708,7 +2701,6 @@ mod test {
             archs_native: vec![],
             host_compiler: NvccHostCompiler::Msvc,
             host_compiler_version: None,
-            specfiles: vec![],
             version: None,
         }
         .parse_arguments(&arguments, ".".as_ref(), &[])
@@ -2721,7 +2713,6 @@ mod test {
             archs_native: vec![],
             host_compiler: NvccHostCompiler::Nvhpc,
             host_compiler_version: None,
-            specfiles: vec![],
             version: None,
         }
         .parse_arguments(&arguments, ".".as_ref(), &[])

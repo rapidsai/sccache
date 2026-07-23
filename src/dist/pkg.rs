@@ -346,8 +346,6 @@ mod toolchain_imp {
             toolchain: &Toolchain,
             writer: &mut (dyn Write + Send),
         ) -> Result<()> {
-            use crate::util::num_cpus;
-
             use gzp::{
                 deflate::Gzip,
                 par::compress::{Compression, ParCompressBuilder},
@@ -367,7 +365,7 @@ mod toolchain_imp {
                 std::thread::scope(|scope| {
                     let compressor = ParCompressBuilder::<Gzip>::new()
                         .compression_level(Compression::default())
-                        .num_threads(num_cpus())?
+                        .num_threads(crate::util::num_cpus())?
                         .from_borrowed_writer(writer, scope);
 
                     let mut builder = tar::Builder::new(compressor);

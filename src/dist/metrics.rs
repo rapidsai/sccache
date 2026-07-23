@@ -78,6 +78,14 @@ impl Drop for GaugeRecorderIncrement<'_> {
 }
 
 impl GaugeRecorder {
+    pub fn new(name: SharedString, labels: Option<Arc<BTreeMap<String, String>>>) -> Self {
+        Self {
+            name,
+            labels,
+            value: AtomicU64::new(0),
+        }
+    }
+
     pub fn increment(&self) -> GaugeRecorderIncrement<'_> {
         let value = &self.value;
         value.fetch_add(1, std::sync::atomic::Ordering::SeqCst);

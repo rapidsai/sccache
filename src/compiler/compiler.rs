@@ -1290,8 +1290,6 @@ where
             ..
         } = self;
 
-        let pending = service.increment_pending_compilations();
-
         // Ensure the dependency file exists
         compilation.generate_dependencies(creator).await?;
 
@@ -1320,8 +1318,6 @@ where
             job_inputs
         };
 
-        drop(pending);
-
         trace!("[{out_pretty}]: Identifying dist toolchain for {executable:?}");
 
         let (dist_toolchain, maybe_dist_compile_executable, packaged_toolchain) = dist_client
@@ -1346,22 +1342,23 @@ where
         let mut has_inputs = false;
         let mut job = None;
 
-        let mut should_retry = |err: &Error, job_id: Option<&str>| {
+        let mut should_retry = |err: &Error, job_id: Option<&str>, server_id: Option<&str>| {
+            use itertools::Itertools;
+
+            let out_pretty = Some(out_pretty.as_str())
+                .iter()
+                .chain(job_id.iter())
+                .chain(server_id.iter())
+                .join(", ");
+
             if num_dist_attempts < dist_retry_limit {
-                debug!(
+                info!(
                     "[{out_pretty}]: Distributed compilation error ({num_dist_attempts} of {dist_retry_limit}), retrying: {err:#}"
                 );
                 num_dist_attempts += 1.0;
                 true
             } else {
-                warn!(
-                    "[{}]: Could not run distributed compilation job: {err}",
-                    if let Some(job_id) = job_id {
-                        [out_pretty, job_id].join(", ")
-                    } else {
-                        out_pretty.to_owned()
-                    }
-                );
+                warn!("[{out_pretty}]: Could not run distributed compilation job: {err}");
                 false
             }
         };
@@ -1377,23 +1374,19 @@ where
             let timeout: u32;
 
             macro_rules! retry_or_bail {
-                ($err:ident, $job_id:expr) => {{
-                    if should_retry(&$err, $job_id) {
+                ($err:ident, $job_id:expr, $server_id:expr) => {{
+                    if should_retry(&$err, $job_id, $server_id) {
                         tokio::time::sleep(retry_delay.next().unwrap()).await;
                         continue;
                     }
                     break Err($err);
                 }};
+                ($err:expr, $job_id:expr, $server_id:expr) => {{
+                    let err = $err;
+                    retry_or_bail!(err, $job_id, $server_id);
+                }};
                 ($err:expr, $job_id:expr) => {{
-                    let err = $err;
-                    retry_or_bail!(err, $job_id);
-                }};
-                ($err:expr) => {{
-                    let err = $err;
-                    retry_or_bail!(err, Some(job_id));
-                }};
-                ($err:ident) => {{
-                    retry_or_bail!($err, Some(job_id));
+                    retry_or_bail!($err, $job_id, None);
                 }};
             }
 
@@ -1429,7 +1422,7 @@ where
                         has_inputs = true;
                     }
                     // Maybe retry network errors
-                    Err(err) => retry_or_bail!(err),
+                    Err(err) => retry_or_bail!(err, Some(job_id.as_str())),
                 }
             }
 
@@ -1443,10 +1436,10 @@ where
                         has_toolchain = true;
                     }
                     Ok(dist::SubmitToolchainResult::Error { message }) => {
-                        retry_or_bail!(anyhow!(message));
+                        retry_or_bail!(anyhow!(message), Some(job_id.as_str()));
                     }
                     // Maybe retry network errors
-                    Err(err) => retry_or_bail!(err),
+                    Err(err) => retry_or_bail!(err, Some(job_id.as_str())),
                 }
             }
 
@@ -1491,7 +1484,11 @@ where
                     debug!(
                         "[{out_pretty}, {job_id}, {server_id}]: Distributed compilation failed (retryable): {message:?}"
                     );
-                    retry_or_bail!(anyhow!("{message:?}"));
+                    retry_or_bail!(
+                        anyhow!(message),
+                        Some(job_id.as_str()),
+                        Some(server_id.as_str())
+                    );
                 }
                 // Missing inputs (S3 cleared, Redis rebooted, etc.)
                 // Can be retried.
@@ -1501,7 +1498,11 @@ where
                     debug!(
                         "[{out_pretty}, {job_id}, {server_id}]: Missing distributed compilation job inputs"
                     );
-                    retry_or_bail!(anyhow!("Missing distributed compilation job inputs"));
+                    retry_or_bail!(
+                        anyhow!("Missing distributed compilation job inputs"),
+                        Some(job_id.as_str()),
+                        Some(server_id.as_str())
+                    );
                 }
                 // Missing toolchain (S3 cleared, Redis rebooted, etc.)
                 // Can be retried.
@@ -1511,7 +1512,11 @@ where
                     debug!(
                         "[{out_pretty}, {job_id}, {server_id}]: Missing distributed compilation job toolchain"
                     );
-                    retry_or_bail!(anyhow!("Missing distributed compilation job toolchain"));
+                    retry_or_bail!(
+                        anyhow!("Missing distributed compilation job toolchain"),
+                        Some(job_id.as_str()),
+                        Some(server_id.as_str())
+                    );
                 }
                 // Missing result (S3 cleared, Redis rebooted, etc.),
                 // or build server failed to write the job result due
@@ -1521,11 +1526,15 @@ where
                     debug!(
                         "[{out_pretty}, {job_id}, {server_id}]: Missing distributed compilation job result"
                     );
-                    retry_or_bail!(anyhow!("Missing distributed compilation job result"));
+                    retry_or_bail!(
+                        anyhow!("Missing distributed compilation job result"),
+                        Some(job_id.as_str()),
+                        Some(server_id.as_str())
+                    );
                 }
                 // Other (e.g. client network, timeout, etc.) errors
                 // Can be retried.
-                Err(err) => retry_or_bail!(anyhow!(err)),
+                Err(err) => retry_or_bail!(anyhow!(err), Some(job_id.as_str())),
             };
 
             debug!(
@@ -1558,7 +1567,7 @@ where
             // an output, we can clean up everything that's been written so far.
             let unpack_result = build_outputs.map(|(path, data)| {
                 let path = path_transformer.to_local(&path).with_context(|| {
-                    format!("[{out_pretty}, {job_id}]: unable to transform output path {path}")
+                    format!("[{out_pretty}, {job_id}, {server_id}]: unable to transform output path {path}")
                 });
 
                 let path = match path {
@@ -1665,13 +1674,15 @@ where
                     if let Err(e) = tokio::fs::remove_file(path).await
                         && e.kind() != io::ErrorKind::NotFound
                     {
-                        debug!("[{out_pretty}, {job_id}]: {e} while attempting to remove {path:?}");
+                        debug!(
+                            "[{out_pretty}, {job_id}, {server_id}]: {e} while attempting to remove {path:?}"
+                        );
                     }
                 }
 
                 if err.downcast_ref::<UnexpectedFileSize>().is_some() {
-                    debug!("[{out_pretty}]: {err:?}");
-                    retry_or_bail!(err);
+                    debug!("[{out_pretty}, {job_id}, {server_id}]: {err:?}");
+                    retry_or_bail!(err, Some(job_id.as_str()), Some(server_id.as_str()));
                 } else {
                     break Err(err);
                 }
@@ -2010,6 +2021,7 @@ where
         // (/usr/local/cuda/nvvm/bin/cicc)
         path.pop();
         path.pop();
+        path.pop();
         path.push("bin");
         path.push("nvcc");
         ("cicc", path)
@@ -2042,7 +2054,7 @@ where
     .map(|nvcc| resolve_compiler_avoiding_wrapper(&nvcc, env));
 
     let version = if let Some(nvcc) = nvcc {
-        if let Ok(nvcc) = detect_c_compiler(creator, nvcc, &[], env, pool.clone()).await {
+        if let Ok(nvcc) = detect_c_compiler(creator, nvcc, &[], cwd, env, pool.clone()).await {
             nvcc.version().unwrap_or_else(|| "unknown".to_owned())
         } else {
             "unknown".to_owned()
@@ -2202,7 +2214,7 @@ where
         .await
         .map(|c| (Box::new(c) as Box<dyn Compiler<T>>, None));
     } else if is_known_c_compiler(&executable) {
-        return detect_c_compiler(creator, executable, args, env, pool)
+        return detect_c_compiler(creator, executable, args, cwd, env, pool)
             .await
             .map(|c| (c, None));
     } else {
@@ -2226,7 +2238,7 @@ where
         Err(e) => {
             // in case we attempted to test for rustc while it didn't look like it, fallback to c compiler detection one last time
             if maybe_rustc_executable.is_none() {
-                detect_c_compiler(creator, executable, args, env, pool)
+                detect_c_compiler(creator, executable, args, cwd, env, pool)
                     .await
                     .map(|c| (c, None))
             } else {
@@ -2388,6 +2400,7 @@ async fn detect_c_compiler<T, P>(
     mut creator: T,
     executable: P,
     arguments: &[OsString],
+    cwd: &Path,
     env: &[(OsString, OsString)],
     pool: tokio::runtime::Handle,
 ) -> Result<Box<dyn Compiler<T>>>
@@ -2526,7 +2539,8 @@ compiler_version=__VERSION__
             }
             "gcc" | "g++" => {
                 trace!("Found {kind} (version: {})", version.as_ref().unwrap());
-                let specfiles =
+                // Include gcc's implicit specfiles in the object hash
+                let extra_hash_files =
                     Gcc::read_implicit_specfiles(&mut creator, &executable, arguments, env, "-v")
                         .await?;
 
@@ -2535,12 +2549,11 @@ compiler_version=__VERSION__
                 return CCompiler::new(
                     Gcc {
                         gplusplus: kind == "g++",
-                        specfiles: specfiles.clone(),
                         version,
                         native_archs,
                     },
                     executable,
-                    specfiles,
+                    extra_hash_files,
                 )
                 .await
                 .map(|c| Box::new(c) as Box<dyn Compiler<T>>);
@@ -2591,7 +2604,8 @@ compiler_version=__VERSION__
                     host_compiler_version.as_ref().unwrap()
                 );
 
-                let specfiles = Nvcc::read_implicit_specfiles(
+                // Include gcc's implicit specfiles in the object hash
+                let mut extra_hash_files = Nvcc::read_implicit_specfiles(
                     &host_compiler,
                     &mut creator,
                     &executable,
@@ -2600,6 +2614,44 @@ compiler_version=__VERSION__
                     "-Xcompiler=-v",
                 )
                 .await?;
+
+                // Include cudafe++, cicc, ptxas, tileiras, and fatbinary
+                // in the hash in case the nvcc binary doesn't change but
+                // one of its subcomponents does.
+                extra_hash_files.extend(
+                    [
+                        executable.with_file_name("cudafe++"),
+                        {
+                            let mut cicc = executable.clone();
+                            cicc.pop();
+                            cicc.pop();
+                            cicc.push("nvvm");
+                            cicc.push("bin");
+                            cicc.push("cicc");
+                            cicc
+                        },
+                        executable.with_file_name("ptxas"),
+                        executable.with_file_name("tileiras"),
+                        executable.with_file_name("fatbinary"),
+                    ]
+                    .into_iter()
+                    .filter_map(|path| {
+                        if path.is_executable() {
+                            Some(path)
+                        } else if let Some(name) = path.file_name() {
+                            let env_path = env
+                                .iter()
+                                .find(|(k, _)| k == "PATH")
+                                .map(|(_, v)| v.as_os_str());
+
+                            which::which_in(name, env_path, cwd).ok()
+                        } else {
+                            None
+                        }
+                    })
+                    // Resolve compiler avoiding ccache wrappers to prevent double-caching.
+                    .map(|path| resolve_compiler_avoiding_wrapper(&path, env)),
+                );
 
                 let archs_all =
                     Nvcc::read_all_archs(&mut creator, &executable, env, &host_compiler)
@@ -2622,10 +2674,9 @@ compiler_version=__VERSION__
                         host_compiler,
                         version,
                         host_compiler_version,
-                        specfiles,
                     },
                     executable,
-                    vec![],
+                    extra_hash_files,
                 )
                 .await
                 .map(|c| Box::new(c) as Box<dyn Compiler<T>>);

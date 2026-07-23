@@ -936,7 +936,7 @@ pub fn run_command(cmd: Command) -> Result<i32> {
 
             trace!("Command::PackageToolchain({})", executable.display());
             let runtime = new_client_runtime()?;
-            let jobserver = Client::new();
+            let jobserver = Client::new_num(1);
             let creator = ProcessCommandCreator::new(&jobserver);
             let args: Vec<_> = env::args_os().collect();
             let env: Vec<_> = env::vars_os().collect();

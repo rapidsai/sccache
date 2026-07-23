@@ -155,7 +155,7 @@ async fn rust_compile(client: &SccacheClient, tmpdir: &Path) -> Result<Output> {
         version = "0.1.0"
         edition = "2021"
         [dependencies]
-        libc = "0.2.169""#,
+        libc = "=0.2.186""#,
     );
     write_source(
         &cargo_path,

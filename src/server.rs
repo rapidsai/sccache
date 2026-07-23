@@ -1499,10 +1499,12 @@ where
                         break pending;
                     }
                     Err(_) => {
-                        // Make this configurable?
-                        let delay = Duration::from_millis(1000);
                         // Jitter so not every task retries at the same time
-                        tokio::time::sleep(tokio_retry2::strategy::jitter(delay)).await;
+                        tokio::time::sleep(tokio_retry2::strategy::jitter_range(1.0, 2.0)(
+                            // Make this configurable?
+                            Duration::from_millis(250),
+                        ))
+                        .await;
                     }
                 }
             }

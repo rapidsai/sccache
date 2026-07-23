@@ -211,7 +211,7 @@ mod scheduler {
         dist::{
             RunJobRequest, RunJobRequestV2, SchedulerService, Toolchain,
             http::{bincode_deserialize, bincode_serialize},
-            metrics::Metrics,
+            metrics::{GaugeRecorder, Metrics},
         },
         errors::*,
     };
@@ -476,8 +476,8 @@ mod scheduler {
                     )
                 })?;
 
-            let Extension::<Arc<Metrics>>(metrics) = req
-                .extract_parts::<Extension<Arc<Metrics>>>()
+            let Extension::<Arc<HTTPMetrics>>(metrics) = req
+                .extract_parts::<Extension<Arc<HTTPMetrics>>>()
                 .await
                 .map_err(|_| {
                     (
@@ -540,6 +540,70 @@ mod scheduler {
         }
     }
 
+    const REQUEST_TIME: &str = "sccache::scheduler::http::request_time";
+    const REQUEST_COUNT: &str = "sccache::scheduler::http::request_count";
+    const REQUESTS_ACTIVE: &str = "sccache::scheduler::http::requests_active";
+
+    struct HTTPMetrics {
+        active: std::sync::Mutex<BTreeMap<Arc<BTreeMap<String, String>>, Arc<GaugeRecorder>>>,
+        metrics: Metrics,
+    }
+
+    impl HTTPMetrics {
+        fn new(metrics: Metrics) -> Self {
+            metrics::describe_histogram!(
+                REQUEST_TIME,
+                metrics::Unit::Seconds,
+                "The time to handle each request in seconds."
+            );
+            metrics::describe_counter!(
+                REQUEST_COUNT,
+                metrics::Unit::Count,
+                "The total number of requests."
+            );
+            metrics::describe_gauge!(
+                REQUESTS_ACTIVE,
+                metrics::Unit::Count,
+                "The number of active requests."
+            );
+
+            Self {
+                active: Default::default(),
+                metrics,
+            }
+        }
+
+        fn active(&self, labels: Arc<BTreeMap<String, String>>) -> Arc<GaugeRecorder> {
+            self.active
+                .lock()
+                .unwrap()
+                .entry(labels.clone())
+                .or_insert_with(|| {
+                    Arc::new(GaugeRecorder::new(REQUESTS_ACTIVE.into(), Some(labels)))
+                })
+                .clone()
+        }
+
+        fn render_to_write(&self, writer: Box<dyn io::Write>) -> io::Result<()> {
+            self.metrics.render_to_write(writer)
+        }
+
+        fn scoped_labels(&self) -> Option<Arc<BTreeMap<String, String>>> {
+            self.metrics.scoped_labels()
+        }
+
+        fn scope_with_labels<F>(
+            &self,
+            local_labels: &BTreeMap<String, String>,
+            f: F,
+        ) -> tokio::task::futures::TaskLocalFuture<Arc<BTreeMap<String, String>>, F>
+        where
+            F: Future,
+        {
+            self.metrics.scope_with_labels(local_labels, f)
+        }
+    }
+
     struct SchedulerState {
         service: Arc<dyn SchedulerService>,
         // Test whether clients are permitted to use the scheduler
@@ -567,7 +631,7 @@ mod scheduler {
             let app = if let Some(path) = metrics.listen_path() {
                 app.route(
                     &path,
-                    routing::get(|Extension::<Arc<Metrics>>(metrics)| async move {
+                    routing::get(|Extension::<Arc<HTTPMetrics>>(metrics)| async move {
                         let (reader, writer) = tokio::io::duplex(4096);
                         let writer = Box::new(SyncIoBridge::new(writer));
                         tokio::spawn(async move {
@@ -594,41 +658,51 @@ mod scheduler {
 
                 // Labels include auth claims to support `GROUPBY "user_id"` etc.
                 let mut labels = auth.as_ref().map(|auth| auth.0.clone()).unwrap_or_default();
-                let job_labels = labels.clone();
 
-                labels.insert("authorized".into(), auth.is_ok().to_string());
-                labels.insert("method".into(), req.method().to_string());
-                labels.insert(
-                    "path".into(),
-                    req.extensions()
-                        .get::<MatchedPath>()
-                        .map(|path| path.as_str().to_string())
-                        .unwrap_or_else(|| req.uri().path().to_owned()),
-                );
+                let authorized = auth.is_ok().to_string();
+                let method = req.method().to_string();
+                let path = req
+                    .extensions()
+                    .get::<MatchedPath>()
+                    .map(|path| path.as_str().to_string())
+                    .unwrap_or_else(|| req.uri().path().to_owned());
 
-                let metrics = req.extract_parts::<Extension<Arc<Metrics>>>().await;
+                labels.insert("method".into(), method.clone());
+                labels.insert("path".into(), path.clone());
 
-                let res = metrics.map(|Extension(metrics): Extension<Arc<Metrics>>| {
-                    CLIENT_AUTH.scope(auth, metrics.scope_with_labels(&job_labels, next.run(req)))
-                });
+                let labels = Arc::new(labels);
+
+                let res = req
+                    .extract_parts::<Extension<Arc<HTTPMetrics>>>()
+                    .await
+                    .map(|Extension(metrics): Extension<Arc<HTTPMetrics>>| {
+                        let labels = labels.clone();
+                        CLIENT_AUTH.scope(auth, async move {
+                            let counter = metrics.active(labels.clone());
+                            let _handle = counter.increment();
+                            metrics.scope_with_labels(&labels, next.run(req)).await
+                        })
+                    })
+                    .map_err(|err| AppError(anyhow!(err)).into_response());
 
                 let res = match res {
                     Ok(res) => res.await,
-                    Err(err) => AppError(anyhow!(err)).into_response(),
+                    Err(res) => res,
                 };
 
+                let mut labels = Arc::unwrap_or_clone(labels);
+                labels.insert("authorized".into(), authorized.clone());
                 labels.insert("status".into(), res.status().as_u16().to_string());
 
-                metrics::counter!("sccache::scheduler::http::request_count", &labels).increment(1);
-                metrics::histogram!("sccache::scheduler::http::request_time", &labels)
-                    .record(start.elapsed().as_secs_f64());
+                metrics::counter!(REQUEST_COUNT, &labels).increment(1);
+                metrics::histogram!(REQUEST_TIME, &labels).record(start.elapsed().as_secs_f64());
 
                 res
             }
 
             // Define this at the end so we also track metrics for the `/metrics` route
             app.route_layer(axum::middleware::from_fn(record_metrics))
-                .layer(Extension(Arc::new(metrics)))
+                .layer(Extension(Arc::new(HTTPMetrics::new(metrics))))
         }
 
         fn routes() -> axum::Router {

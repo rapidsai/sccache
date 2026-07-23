@@ -49,7 +49,6 @@ use std::{
 #[derive(Clone, Debug, Default)]
 pub struct Gcc {
     pub gplusplus: bool,
-    pub specfiles: Vec<PathBuf>,
     pub version: Option<String>,
     pub native_archs: Option<(String, String)>,
 }
@@ -160,11 +159,6 @@ impl CCompilerImpl for Gcc {
         let mut parsed_args =
             parse_arguments(arguments, cwd, &ARGS[..], self.gplusplus, self.kind());
         if let CompilerArguments::Ok(ref mut parsed_args) = parsed_args {
-            // Include gcc's implicit specfiles in the object hash
-            parsed_args
-                .extra_hash_files
-                .extend(self.specfiles.iter().cloned());
-
             // Rewrite -march=native to the current CPU architecture to
             // ensure the correct architecture is used if dist compiling
             if let Some((native_march, native_mtune)) = self.native_archs.as_ref() {

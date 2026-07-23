@@ -1657,12 +1657,13 @@ pub fn num_cpus() -> usize {
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
     {
-        req_cpus.clamp(1, num_cpus)
+        req_cpus.max(1)
     } else if let Some(percent) = std::env::var("SCCACHE_THREADS_PERCENT")
         .ok()
         .and_then(|s| s.parse::<f64>().ok())
+        .map(|percent| percent / 100.0)
     {
-        ((percent * (num_cpus as f64)).floor() as usize).clamp(1, num_cpus)
+        ((percent * (num_cpus as f64)).floor() as usize).max(1)
     } else {
         num_cpus
     }
