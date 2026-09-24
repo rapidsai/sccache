@@ -15,3 +15,7 @@ repos:
         pass_filenames: false
         types: [file, rust]
         language: system
+-   repo: https://github.com/zizmorcore/zizmor-pre-commit
+    rev: v1.25.2
+    hooks:
+    - id: zizmor
