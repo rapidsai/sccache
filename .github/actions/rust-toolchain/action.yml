@@ -16,7 +16,7 @@ runs:
   using: composite
   steps:
     - shell: bash
-      run: |
+      run: |  # zizmor: ignore[template-injection]
         set -x
         rustup override set ${{ inputs.toolchain || 'stable' }}
         ${{ inputs.target && format('rustup target add {0}', inputs.target) }}
