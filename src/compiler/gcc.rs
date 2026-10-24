@@ -1338,8 +1338,10 @@ where
         .as_deref()
         .and_then(|s| s.to_str());
 
-    let (deps_arg, depfile) = match structured_depfile_format {
-        Some("p1689r5") => (
+    let (deps_arg, depfile) = if matches!(kind, CCompilerKind::Nvhpc)
+        || matches!(structured_depfile_format, Some("p1689r5"))
+    {
+        (
             OsStr::new("-MD"),
             depfile.or_else(|| {
                 Some({
@@ -1349,8 +1351,9 @@ where
                     }
                 })
             }),
-        ),
-        _ => (OsStr::new("-M"), depfile),
+        )
+    } else {
+        (OsStr::new("-M"), depfile)
     };
 
     let cmd = {

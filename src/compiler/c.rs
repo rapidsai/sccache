@@ -1589,17 +1589,17 @@ impl<I: CCompilerImpl, T: CommandCreatorSync> pkg::InputsPackager for CCompilati
             );
         }
 
-        use itertools::Itertools;
-        trace!(
-            "Dist inputs:\n{}",
-            std::iter::empty()
-                .chain(dist_files.iter().unique())
-                .chain(parsed_args.extra_dist_files.iter())
-                .unique()
-                .map(|path| format!("  {}", path.display()))
-                .collect::<Vec<_>>()
-                .join("\n")
-        );
+        // use itertools::Itertools;
+        // trace!(
+        //     "Dist inputs:\n{}",
+        //     std::iter::empty()
+        //         .chain(dist_files.iter().unique())
+        //         .chain(parsed_args.extra_dist_files.iter())
+        //         .unique()
+        //         .map(|path| format!("  {}", path.display()))
+        //         .collect::<Vec<_>>()
+        //         .join("\n")
+        // );
 
         let mut package = pkg::ArchiveBuilder::new(path_transformer);
 
@@ -1631,17 +1631,17 @@ impl<I: CCompilerImpl, T: CommandCreatorSync> pkg::InputsPackager for CCompilati
             dist_files.extend(get_dependencies_dist(&self.obj_key, deps_args).await?);
         }
 
-        use itertools::Itertools;
-        trace!(
-            "Dist inputs:\n{}",
-            std::iter::empty()
-                .chain(dist_files.iter().unique())
-                .chain(parsed_args.extra_dist_files.iter())
-                .unique()
-                .map(|path| format!("  {}", path.display()))
-                .collect::<Vec<_>>()
-                .join("\n")
-        );
+        // use itertools::Itertools;
+        // trace!(
+        //     "Dist inputs:\n{}",
+        //     std::iter::empty()
+        //         .chain(dist_files.iter().unique())
+        //         .chain(parsed_args.extra_dist_files.iter())
+        //         .unique()
+        //         .map(|path| format!("  {}", path.display()))
+        //         .collect::<Vec<_>>()
+        //         .join("\n")
+        // );
 
         let mut package = pkg::ArchiveBuilder::new(path_transformer);
 
