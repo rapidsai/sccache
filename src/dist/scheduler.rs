@@ -539,23 +539,30 @@ impl SchedulerService for Scheduler {
         toolchain: Toolchain,
         inputs: Vec<String>,
     ) -> Result<NewJobResponseV3> {
-        let res = self.new_job(toolchain, Default::default()).await?;
-        let missing_inputs = futures::future::join_all(inputs.into_iter().map(|digest| async {
-            if !self.jobs_io.has_job_inputs(&digest).await {
-                Some(digest)
-            } else {
-                None
-            }
-        }))
-        .await
-        .into_iter()
-        .flatten()
-        .collect();
+        let (
+            NewJobResponse {
+                job_id,
+                timeout,
+                has_toolchain,
+                ..
+            },
+            missing_inputs,
+        ) = futures::future::try_join(
+            async { self.new_job(toolchain, Default::default()).await },
+            async {
+                Ok(self
+                    .jobs_io
+                    .missing_job_inputs(inputs.iter().map(|s| s.as_str()))
+                    .await
+                    .unwrap_or_default())
+            },
+        )
+        .await?;
 
         Ok(NewJobResponseV3 {
-            job_id: res.job_id,
-            timeout: res.timeout,
-            has_toolchain: res.has_toolchain,
+            job_id,
+            timeout,
+            has_toolchain,
             missing_inputs,
         })
     }
