@@ -131,13 +131,13 @@ pub struct SourceFileMeta {
 }
 
 #[derive(Clone, Debug)]
-pub struct SourceFileCache {
+pub struct CSourceFileCache {
     lru: Arc<Mutex<LruCache<PathBuf, Arc<SourceFileEntry>>>>,
 }
 
-impl SourceFileCache {
+impl CSourceFileCache {
     pub fn new(capacity: u64) -> Self {
-        SourceFileCache {
+        CSourceFileCache {
             lru: Arc::new(Mutex::new(LruCache::new(capacity))),
         }
     }
@@ -456,7 +456,7 @@ impl SourceFileDeps {
     /// are already on disk and have not changed.
     pub async fn find_dependencies(
         &mut self,
-        source_file_cache: &SourceFileCache,
+        source_file_cache: &CSourceFileCache,
         compile_timestamp: chrono::DateTime<chrono::Utc>,
         transitive: bool,
         out_pretty: &str,
@@ -526,7 +526,7 @@ impl SourceFileDeps {
     /// are already on disk and have not changed.
     pub fn find_dependencies_sync(
         &mut self,
-        source_file_cache: &SourceFileCache,
+        source_file_cache: &CSourceFileCache,
         compile_timestamp: chrono::DateTime<chrono::Utc>,
         transitive: bool,
         out_pretty: &str,
@@ -593,7 +593,7 @@ impl SourceFileDeps {
 
     /// A result matches if all of its include files exist on disk and have not changed.
     async fn test_dependencies(
-        source_file_cache: &SourceFileCache,
+        source_file_cache: &CSourceFileCache,
         compile_timestamp: chrono::DateTime<chrono::Utc>,
         dependencies: &mut [SourceFileMeta],
         hidden_incs: &mut HiddenIncludes,
@@ -670,7 +670,7 @@ impl SourceFileDeps {
 
     /// A result matches if all of its include files exist on disk and have not changed.
     fn test_dependencies_sync(
-        source_file_cache: &SourceFileCache,
+        source_file_cache: &CSourceFileCache,
         compile_timestamp: chrono::DateTime<chrono::Utc>,
         dependencies: &mut [SourceFileMeta],
         hidden_incs: &mut HiddenIncludes,
@@ -864,6 +864,42 @@ impl Serialize for SourceFileDeps {
         map.serialize_entry("size", &self.revs.capacity())?;
         map.serialize_entry("revs", &self.iter().rev().collect::<Vec<_>>())?;
         map.end()
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct SourceDigestCache {
+    lru: Arc<Mutex<LruCache<PathBuf, String>>>,
+}
+
+impl Default for SourceDigestCache {
+    fn default() -> Self {
+        Self::new(50_000)
+    }
+}
+
+impl SourceDigestCache {
+    pub fn new(capacity: u64) -> Self {
+        Self {
+            lru: Arc::new(Mutex::new(LruCache::new(capacity))),
+        }
+    }
+
+    pub fn get_sync<P: AsRef<Path>>(&self, path: P) -> Result<String> {
+        // Assumes path has been canonicalized
+        let path = path.as_ref();
+
+        let mut lru = self.lru.lock().unwrap();
+
+        let hash = if let Some(hash) = lru.get(path) {
+            hash.clone()
+        } else {
+            let hash = Digest::from_file_sync(path)?.finish();
+            lru.insert(path.to_owned(), hash.clone());
+            hash
+        };
+
+        Ok(hash)
     }
 }
 

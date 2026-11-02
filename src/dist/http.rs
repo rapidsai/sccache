@@ -1084,7 +1084,7 @@ mod client {
 
     use tokio_util::compat::FuturesAsyncReadCompatExt;
 
-    use std::collections::HashMap;
+    use std::collections::{BTreeMap, HashMap};
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
     use std::time::Duration;
@@ -1094,15 +1094,19 @@ mod client {
         common::{ReqwestRequestBuilderExt, bincode_req_fut},
         urls,
     };
+    use crate::compiler::SourceDigestCache;
     use crate::{
         config,
         dist::{
-            self, CompileCommand, JobInput, SchedulerStatus, SubmitToolchainResult, Toolchain,
+            self, ArchiveContents, CompileCommand, JobInput, JobInputs, SchedulerStatus,
+            SubmitToolchainResult, Toolchain,
             pkg::{ArchivePackager, ToolchainPackager},
             v3::{NewJobRequest, NewJobResponse, RunJobRequest, RunJobResponse},
         },
         errors::*,
-        util::{AsyncMulticast, AsyncMulticastArgs, AsyncMulticastFunc, new_reqwest_client},
+        util::{
+            AsyncMulticast, AsyncMulticastArgs, AsyncMulticastFunc, new_reqwest_client, path_to_str,
+        },
     };
 
     #[derive(Clone)]
@@ -1280,6 +1284,8 @@ mod client {
         put_toolchain: AsyncMulticast<SubmitToolchainArgs, SubmitToolchainResult>,
         put_job_input: AsyncMulticast<PutInputArgs, ()>,
         tc_cache: Arc<cache::ClientToolchains>,
+        /// Cache of source file hashes
+        source_digest_cache: SourceDigestCache,
     }
 
     impl Client {
@@ -1324,12 +1330,101 @@ mod client {
                 put_toolchain,
                 put_job_input,
                 tc_cache: client_toolchains,
+                source_digest_cache: SourceDigestCache::new(50_000),
             })
+        }
+
+        pub async fn get_job_inputs(
+            cache: SourceDigestCache,
+            contents: dist::ArchiveContents,
+            inputs: BTreeMap<String, JobInput>,
+        ) -> Result<(dist::JobInputs, BTreeMap<String, JobInput>)> {
+            use crate::util::Digest;
+            use itertools::Itertools;
+            let ArchiveContents { dirs, files, links } = contents;
+
+            tokio::task::spawn_blocking(move || {
+                let (mut digest, files, inputs) = files
+                    .into_iter()
+                    .map(|(dist_path, file_path)| {
+                        let file_hash = cache.get_sync(&file_path)?;
+                        let dist_path = path_to_str(dist_path)?.into_owned();
+                        Ok::<_, anyhow::Error>((dist_path, (file_hash, file_path)))
+                    })
+                    .try_fold(
+                        (Digest::new(), BTreeMap::new(), inputs),
+                        |(mut digest, mut files, mut inputs), res| {
+                            let (dist_path, (file_hash, file_path)) = res?;
+                            digest.update(file_hash.as_bytes());
+                            digest.update(dist_path.as_bytes());
+                            if let Ok(file_path) = path_to_str(&file_path) {
+                                digest.update(file_path.as_bytes());
+                            }
+                            files.insert(dist_path, file_hash.clone());
+                            inputs.insert(file_hash, JobInput::File(file_path));
+                            Ok::<_, anyhow::Error>((digest, files, inputs))
+                        },
+                    )?;
+
+                let dirs = dirs
+                    .into_iter()
+                    .map(|(dist_path, dir_path)| {
+                        let dist_path = path_to_str(dist_path)?;
+                        let dir_path = path_to_str(dir_path)?;
+                        digest.update(dist_path.as_bytes());
+                        digest.update(dir_path.as_bytes());
+                        Ok::<_, anyhow::Error>(dist_path.into_owned())
+                    })
+                    .try_collect::<_, Vec<_>, _>()?;
+
+                let links = links
+                    .into_iter()
+                    .map(|(dist_path, (link_name, link_path))| {
+                        let dist_path = path_to_str(dist_path)?;
+                        let link_name = path_to_str(link_name)?;
+                        let link_path = path_to_str(link_path)?;
+                        digest.update(dist_path.as_bytes());
+                        digest.update(link_name.as_bytes());
+                        digest.update(link_path.as_bytes());
+                        Ok::<_, anyhow::Error>((dist_path.into_owned(), link_path.into_owned()))
+                    })
+                    .try_collect::<_, BTreeMap<_, _>, _>()?;
+
+                // trace!(
+                //     "Dist inputs:\n{}",
+                //     std::iter::empty()
+                //         .chain(dirs.iter().map(|p| format!("  dir: {p}")))
+                //         .chain(links.iter().map(|(s, t)| format!("  link: {s} -> {t}")))
+                //         .chain(files.iter().map(|(p, h)| format!("  file: {p} ({h})")))
+                //         .unique()
+                //         .collect::<Vec<_>>()
+                //         .join("\n")
+                // );
+
+                Ok::<_, anyhow::Error>((
+                    JobInputs::Manifest {
+                        hash: digest.finish(),
+                        dirs,
+                        files,
+                        links,
+                    },
+                    inputs,
+                ))
+            })
+            .await?
         }
     }
 
     #[async_trait]
     impl dist::Client for Client {
+        async fn get_job_inputs(
+            &self,
+            contents: dist::ArchiveContents,
+            inputs: BTreeMap<String, JobInput>,
+        ) -> Result<(dist::JobInputs, BTreeMap<String, JobInput>)> {
+            Self::get_job_inputs(self.source_digest_cache.clone(), contents, inputs).await
+        }
+
         async fn new_job(
             &self,
             toolchain: Toolchain,

@@ -57,7 +57,7 @@ pub trait InputsPackager: Send {
     async fn describe_inputs(
         self: Box<Self>,
         path_transformer: &mut dist::PathTransformer,
-    ) -> Result<(dist::JobInputs, BTreeMap<String, JobInput>)>;
+    ) -> Result<(dist::ArchiveContents, BTreeMap<String, JobInput>)>;
 }
 
 pub struct ArchiveBuilder<'a> {
@@ -241,13 +241,7 @@ impl<'a> ArchiveBuilder<'a> {
         .simplify(path.as_ref())
     }
 
-    pub fn describe(
-        self,
-    ) -> Result<(
-        BTreeMap<PathBuf, PathBuf>,
-        BTreeMap<PathBuf, PathBuf>,
-        BTreeMap<PathBuf, (PathBuf, PathBuf)>,
-    )> {
+    pub fn describe(self) -> Result<dist::ArchiveContents> {
         use itertools::Itertools;
 
         // Adjust the archive paths with the PathTransformer
@@ -295,11 +289,19 @@ impl<'a> ArchiveBuilder<'a> {
             .try_collect()
             .context("Failed transforming symlink paths")?;
 
-        Ok((dirs_set, file_set, symlinks))
+        Ok(dist::ArchiveContents {
+            dirs: dirs_set,
+            files: file_set,
+            links: symlinks,
+        })
     }
 
     pub fn build(self) -> Result<Arc<dyn ArchivePackager>> {
-        let (dirs_set, file_set, symlinks) = self.describe()?;
+        let dist::ArchiveContents {
+            dirs: dirs_set,
+            files: file_set,
+            links: symlinks,
+        } = self.describe()?;
         Ok(Arc::new(ArchivePackagerImpl {
             dirs_set: dirs_set
                 .into_iter()

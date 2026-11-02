@@ -1356,7 +1356,8 @@ where
 
         use crate::util::path_to_str;
 
-        let pending = service.increment_pending_compilations();
+        let mut pending = Some(service.increment_pending_compilations());
+        let mut uploading = None;
 
         let save_outputs_as_job_input = compilation.save_outputs_as_job_input();
         let mut dist_compile_cmd = dist_compile_cmd.as_dist(&mut path_transformer)?;
@@ -1366,9 +1367,14 @@ where
 
         let (inputs_manifest, hashed_inputs) = {
             trace!("[{out_pretty}]: Hashing dist inputs");
-            inputs_packager
+
+            let (contents, inputs) = inputs_packager
                 .describe_inputs(&mut path_transformer)
-                .await?
+                .await?;
+
+            let (manifest, inputs) = dist_client.get_job_inputs(contents, inputs).await?;
+
+            (manifest, inputs)
         };
 
         trace!("[{out_pretty}]: Identifying dist toolchain for {executable:?}");
@@ -1437,8 +1443,6 @@ where
             .max_delay(Duration::from_secs(10))
             .map(tokio_retry2::strategy::jitter);
 
-        drop(pending);
-
         let dist_compile_res = loop {
             use futures::TryStreamExt;
 
@@ -1462,11 +1466,12 @@ where
                 }};
             }
 
-            let pending = service.increment_pending_compilations();
-
             (job_id, timeout) = if let Some((ref job_id, timeout)) = job {
                 (job_id, timeout)
             } else {
+                pending.get_or_insert_with(|| service.increment_pending_compilations());
+                uploading.get_or_insert_with(|| service.increment_uploading_compilations());
+
                 trace!("[{out_pretty}]: Requesting job allocation");
 
                 match dist_client
@@ -1489,7 +1494,11 @@ where
             };
 
             if !missing_inputs.is_empty() {
-                debug!("[{out_pretty}, {job_id}]: Submitting job inputs: {missing_inputs:?}");
+                pending.get_or_insert_with(|| service.increment_pending_compilations());
+                uploading.get_or_insert_with(|| service.increment_uploading_compilations());
+
+                debug!("[{out_pretty}, {job_id}]: Uploading job inputs: {missing_inputs:?}");
+
                 match dist_client
                     .put_job(
                         missing_inputs
@@ -1513,6 +1522,11 @@ where
             }
 
             if !has_toolchain {
+                pending.get_or_insert_with(|| service.increment_pending_compilations());
+                uploading.get_or_insert_with(|| service.increment_uploading_compilations());
+
+                debug!("[{out_pretty}, {job_id}]: Uploading toolchain: {dist_toolchain}");
+
                 match dist_client
                     .put_toolchain(dist_toolchain.clone(), packaged_toolchain.clone())
                     .await
@@ -1541,7 +1555,7 @@ where
                 save_outputs_as_job_input,
             );
 
-            drop(pending);
+            let _ = (pending.take(), uploading.take());
 
             let active = service.increment_active_compilations();
 
@@ -4910,7 +4924,7 @@ mod test_dist {
     use crate::mock_command::ProcessOutput;
     use async_trait::async_trait;
     use std::{
-        collections::HashMap,
+        collections::{BTreeMap, HashMap},
         io::Write,
         path::{Path, PathBuf},
         sync::{Arc, atomic::AtomicBool},
@@ -4949,6 +4963,13 @@ mod test_dist {
     }
     #[async_trait]
     impl dist::Client for ErrorPutToolchainClient {
+        async fn get_job_inputs(
+            &self,
+            contents: dist::ArchiveContents,
+            inputs: BTreeMap<String, JobInput>,
+        ) -> Result<(dist::JobInputs, BTreeMap<String, JobInput>)> {
+            dist::http::Client::get_job_inputs(Default::default(), contents, inputs).await
+        }
         async fn new_job(&self, _: Toolchain, _: Vec<String>) -> Result<NewJobResponse> {
             unreachable!()
         }
@@ -5022,6 +5043,13 @@ mod test_dist {
     }
     #[async_trait]
     impl dist::Client for ErrorAllocJobClient {
+        async fn get_job_inputs(
+            &self,
+            contents: dist::ArchiveContents,
+            inputs: BTreeMap<String, JobInput>,
+        ) -> Result<(dist::JobInputs, BTreeMap<String, JobInput>)> {
+            dist::http::Client::get_job_inputs(Default::default(), contents, inputs).await
+        }
         async fn new_job(&self, tc: Toolchain, _: Vec<String>) -> Result<NewJobResponse> {
             assert_eq!(self.tc, tc);
             Err(anyhow!("MOCK: alloc job failure"))
@@ -5099,6 +5127,13 @@ mod test_dist {
 
     #[async_trait]
     impl dist::Client for ErrorSubmitToolchainClient {
+        async fn get_job_inputs(
+            &self,
+            contents: dist::ArchiveContents,
+            inputs: BTreeMap<String, JobInput>,
+        ) -> Result<(dist::JobInputs, BTreeMap<String, JobInput>)> {
+            dist::http::Client::get_job_inputs(Default::default(), contents, inputs).await
+        }
         async fn new_job(&self, tc: Toolchain, _: Vec<String>) -> Result<NewJobResponse> {
             assert!(
                 !self
@@ -5188,6 +5223,13 @@ mod test_dist {
 
     #[async_trait]
     impl dist::Client for ErrorRunJobClient {
+        async fn get_job_inputs(
+            &self,
+            contents: dist::ArchiveContents,
+            inputs: BTreeMap<String, JobInput>,
+        ) -> Result<(dist::JobInputs, BTreeMap<String, JobInput>)> {
+            dist::http::Client::get_job_inputs(Default::default(), contents, inputs).await
+        }
         async fn new_job(&self, tc: Toolchain, _: Vec<String>) -> Result<NewJobResponse> {
             assert!(
                 !self
@@ -5298,6 +5340,13 @@ mod test_dist {
 
     #[async_trait]
     impl dist::Client for OneshotClient {
+        async fn get_job_inputs(
+            &self,
+            contents: dist::ArchiveContents,
+            inputs: BTreeMap<String, JobInput>,
+        ) -> Result<(dist::JobInputs, BTreeMap<String, JobInput>)> {
+            dist::http::Client::get_job_inputs(Default::default(), contents, inputs).await
+        }
         async fn new_job(&self, tc: Toolchain, _: Vec<String>) -> Result<NewJobResponse> {
             assert!(
                 !self

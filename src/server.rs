@@ -966,6 +966,8 @@ where
     pending_compilations: Arc<SccacheGauge>,
     /// The count of currently active cache lookups.
     pending_cache_lookups: Arc<SccacheGauge>,
+    /// The count of currently uploading dist-compilations.
+    uploading_compilations: Arc<SccacheGauge>,
     /// The count of currently active compile requests.
     active_compilations: Arc<SccacheGauge>,
 
@@ -1033,6 +1035,14 @@ where
 
     pub fn increment_pending_compilations(&self) -> SccacheGaugeIncrement {
         self.pending_compilations.increment()
+    }
+
+    pub fn uploading_compilations(&self) -> u64 {
+        self.uploading_compilations.value()
+    }
+
+    pub fn increment_uploading_compilations(&self) -> SccacheGaugeIncrement {
+        self.uploading_compilations.increment()
     }
 }
 
@@ -1218,6 +1228,7 @@ where
             queued_compilations: Arc::default(),
             pending_compilations: Arc::default(),
             pending_cache_lookups: Arc::default(),
+            uploading_compilations: Arc::default(),
             active_compilations: Arc::default(),
             dist_client,
             storage,
@@ -1254,6 +1265,7 @@ where
             queued_compilations: Arc::default(),
             pending_compilations: Arc::default(),
             pending_cache_lookups: Arc::default(),
+            uploading_compilations: Arc::default(),
             active_compilations: Arc::default(),
             dist_client,
             storage,
@@ -1306,6 +1318,7 @@ where
             queued_compilations: Arc::default(),
             pending_compilations: Arc::default(),
             pending_cache_lookups: Arc::default(),
+            uploading_compilations: Arc::default(),
             active_compilations: Arc::default(),
             dist_client,
             storage,
@@ -1395,6 +1408,7 @@ where
             queued_compilations: self.queued_compilations(),
             pending_cache_lookups: self.pending_cache_lookups(),
             pending_compilations: self.pending_compilations(),
+            uploading_compilations: self.uploading_compilations(),
             ..self.stats.lock().await.clone()
         };
         ServerInfo::new(stats, Some(&*self.storage)).await
@@ -2055,6 +2069,8 @@ pub struct ServerStats {
     pub pending_compilations: u64,
     /// The count of currently active cache lookups.
     pub pending_cache_lookups: u64,
+    /// The count of currently uploading dist-compilations.
+    pub uploading_compilations: u64,
     /// The count of client compile requests.
     pub compile_requests: u64,
     /// The count of errors handling compile requests (per language).
@@ -2120,6 +2136,7 @@ impl std::ops::AddAssign for ServerStats {
         self.queued_compilations += rhs.queued_compilations;
         self.pending_compilations += rhs.pending_compilations;
         self.pending_cache_lookups += rhs.pending_cache_lookups;
+        self.uploading_compilations += rhs.uploading_compilations;
         self.compile_requests += rhs.compile_requests;
         self.compile_request_errors += rhs.compile_request_errors;
         self.requests_unsupported_compiler += rhs.requests_unsupported_compiler;
@@ -2190,6 +2207,7 @@ impl Default for ServerStats {
             queued_compilations: u64::default(),
             pending_compilations: u64::default(),
             pending_cache_lookups: u64::default(),
+            uploading_compilations: u64::default(),
             compile_requests: u64::default(),
             compile_request_errors: PerLanguageCount::new(),
             requests_unsupported_compiler: u64::default(),
@@ -2297,6 +2315,13 @@ impl ServerStats {
             self.pending_cache_lookups,
             "Pending cache lookups"
         );
+        if self.uploading_compilations > 0 {
+            set_stat!(
+                stats_vec,
+                self.uploading_compilations,
+                "Active dist uploads"
+            );
+        }
         set_stat!(stats_vec, self.active_compilations, "Active compilations");
         set_stat!(stats_vec, self.compile_requests, "Compile requests");
         set_stat!(

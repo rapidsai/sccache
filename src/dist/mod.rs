@@ -1007,6 +1007,12 @@ pub enum JobInputs {
     },
 }
 
+pub struct ArchiveContents {
+    pub dirs: BTreeMap<PathBuf, PathBuf>,
+    pub files: BTreeMap<PathBuf, PathBuf>,
+    pub links: BTreeMap<PathBuf, (PathBuf, PathBuf)>,
+}
+
 // Toolchain
 
 // TODO: Clone by assuming immutable/no GC for now
@@ -1222,6 +1228,11 @@ pub trait BuilderIncoming: Send + Sync {
 /////////
 #[async_trait]
 pub trait Client: Send + Sync {
+    async fn get_job_inputs(
+        &self,
+        contents: ArchiveContents,
+        inputs: BTreeMap<String, JobInput>,
+    ) -> Result<(JobInputs, BTreeMap<String, JobInput>)>;
     // To Scheduler
     async fn new_job(
         &self,

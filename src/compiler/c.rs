@@ -19,7 +19,7 @@ use crate::{
         Compiler, CompilerArguments, CompilerHasher, CompilerKind, GenerateHashKeyArgs, HashResult,
         Language,
         util::{
-            DEPS_VERSION, Dependencies, HiddenIncludes, SourceFileCache, SourceFileDeps,
+            CSourceFileCache, DEPS_VERSION, Dependencies, HiddenIncludes, SourceFileDeps,
             SourceFileEntry,
         },
     },
@@ -1583,11 +1583,7 @@ impl<I: CCompilerImpl, T: CommandCreatorSync> pkg::InputsPackager for CCompilati
     async fn describe_inputs(
         self: Box<Self>,
         path_transformer: &mut dist::PathTransformer,
-    ) -> Result<(dist::JobInputs, BTreeMap<String, JobInput>)> {
-        use crate::util::path_to_str;
-        use futures::{StreamExt, TryStreamExt};
-        use itertools::Itertools;
-
+    ) -> Result<(dist::ArchiveContents, BTreeMap<String, JobInput>)> {
         let mut output_dirs = self.outputs().map(|obj| obj.dir).collect::<Vec<_>>();
 
         let CCompilation {
@@ -1605,7 +1601,7 @@ impl<I: CCompilerImpl, T: CommandCreatorSync> pkg::InputsPackager for CCompilati
             dist_files.extend(get_dependencies_dist(&self.obj_key, deps_args).await?);
         }
 
-        let (dirs, files, links, pt) = tokio::task::spawn_blocking({
+        let (contents, inputs, pt) = tokio::task::spawn_blocking({
             let mut pt = path_transformer.clone();
             move || {
                 let mut package = pkg::ArchiveBuilder::new(&mut pt);
@@ -1622,83 +1618,16 @@ impl<I: CCompilerImpl, T: CommandCreatorSync> pkg::InputsPackager for CCompilati
                 }
 
                 // Get the inputs after simplifying and transforming paths
-                let (dirs, files, links) = package.describe()?;
+                let contents = package.describe()?;
 
-                Ok::<_, anyhow::Error>((dirs, files, links, pt))
+                Ok::<_, anyhow::Error>((contents, BTreeMap::new(), pt))
             }
         })
         .await??;
 
         *path_transformer = pt;
 
-        let (mut digest, files, inputs) = futures::stream::iter(files)
-            .flat_map_unordered(None, |(dist_path, file_path)| {
-                futures::stream::once(Box::pin(async move {
-                    let dist_path = path_to_str(dist_path)?.into_owned();
-                    let file_hash = Digest::from_file(&file_path).await?.finish();
-                    Ok::<_, anyhow::Error>((dist_path, (file_hash, file_path)))
-                }))
-            })
-            .try_collect::<BTreeMap<_, _>>()
-            .await?
-            .into_iter()
-            .fold(
-                (Digest::new(), BTreeMap::new(), BTreeMap::new()),
-                |(mut digest, mut files, mut inputs), (dist_path, (file_hash, file_path))| {
-                    digest.update(file_hash.as_bytes());
-                    digest.update(dist_path.as_bytes());
-                    if let Ok(file_path) = path_to_str(&file_path) {
-                        digest.update(file_path.as_bytes());
-                    }
-                    files.insert(dist_path, file_hash.clone());
-                    inputs.insert(file_hash, JobInput::File(file_path));
-                    (digest, files, inputs)
-                },
-            );
-
-        let dirs = dirs
-            .into_iter()
-            .map(|(dist_path, dir_path)| {
-                let dist_path = path_to_str(dist_path)?;
-                let dir_path = path_to_str(dir_path)?;
-                digest.update(dist_path.as_bytes());
-                digest.update(dir_path.as_bytes());
-                Ok::<_, anyhow::Error>(dist_path.into_owned())
-            })
-            .try_collect::<_, Vec<_>, _>()?;
-
-        let links = links
-            .into_iter()
-            .map(|(dist_path, (link_name, link_path))| {
-                let dist_path = path_to_str(dist_path)?;
-                let link_name = path_to_str(link_name)?;
-                let link_path = path_to_str(link_path)?;
-                digest.update(dist_path.as_bytes());
-                digest.update(link_name.as_bytes());
-                digest.update(link_path.as_bytes());
-                Ok::<_, anyhow::Error>((dist_path.into_owned(), link_path.into_owned()))
-            })
-            .try_collect::<_, BTreeMap<_, _>, _>()?;
-
-        // trace!(
-        //     "Dist inputs:\n{}",
-        //     std::iter::empty()
-        //         .chain(dirs.iter().map(|p| format!("  dir: {p}")))
-        //         .chain(links.iter().map(|(s, t)| format!("  link: {s} -> {t}")))
-        //         .chain(files.iter().map(|(p, h)| format!("  file: {p} ({h})")))
-        //         .unique()
-        //         .collect::<Vec<_>>()
-        //         .join("\n")
-        // );
-
-        let manifest = dist::JobInputs::Manifest {
-            hash: digest.finish(),
-            dirs,
-            files,
-            links,
-        };
-
-        Ok::<_, anyhow::Error>((manifest, inputs))
+        Ok::<_, anyhow::Error>((contents, inputs))
     }
 }
 
@@ -2327,8 +2256,8 @@ static CACHED_ENV_VARS: LazyLock<HashSet<&'static OsStr>> = LazyLock::new(|| {
 });
 
 // cache for hashed source files
-static SOURCE_FILE_CACHE: LazyLock<SourceFileCache> = LazyLock::new(|| {
-    SourceFileCache::new(
+static SOURCE_FILE_CACHE: LazyLock<CSourceFileCache> = LazyLock::new(|| {
+    CSourceFileCache::new(
         // TODO: capacity chosen arbitrarily, should measure instead
         50_000,
     )

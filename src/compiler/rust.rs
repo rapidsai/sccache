@@ -2132,12 +2132,8 @@ impl pkg::InputsPackager for RustInputsPackager {
     async fn describe_inputs(
         self: Box<Self>,
         path_transformer: &mut dist::PathTransformer,
-    ) -> Result<(dist::JobInputs, BTreeMap<String, JobInput>)> {
-        use crate::util::path_to_str;
-        use futures::{StreamExt, TryStreamExt};
-        use itertools::Itertools;
-
-        debug!("Packaging compile inputs for compile");
+    ) -> Result<(dist::ArchiveContents, BTreeMap<String, JobInput>)> {
+        debug!("Packaging inputs for compile");
 
         let RustInputsPackager {
             crate_link_paths,
@@ -2146,9 +2142,9 @@ impl pkg::InputsPackager for RustInputsPackager {
             output_dirs,
             rlib_dep_reader,
             env_vars,
-        } = *{ self };
+        } = *self;
 
-        let (dirs, files, links, inputs, pt) = tokio::task::spawn_blocking({
+        let (contents, inputs, pt) = tokio::task::spawn_blocking({
             let mut pt = path_transformer.clone();
             move || {
                 let mut package = pkg::ArchiveBuilder::new(&mut pt);
@@ -2207,7 +2203,6 @@ impl pkg::InputsPackager for RustInputsPackager {
                 // crate, otherwise we need to send everything.
                 // let mut tar_crate_libs = vec![];
                 for crate_link_path in crate_link_paths {
-                    // let crate_link_path = simplify_path(&crate_link_path)?;
                     let dir_entries = match fs::read_dir(crate_link_path) {
                         Ok(iter) => iter,
                         Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
@@ -2294,11 +2289,11 @@ impl pkg::InputsPackager for RustInputsPackager {
                 );
 
                 // Get the inputs after simplifying and transforming paths
-                let (dirs, mut files, links) = package.describe()?;
+                let mut contents = package.describe()?;
 
                 let mut inputs = BTreeMap::new();
 
-                files.retain(|_, file_path| {
+                contents.files.retain(|_, file_path| {
                     if can_trim_rlibs && can_trim_this(file_path) {
                         let Ok(file) = fs::File::open(file_path.as_path()) else {
                             // This error will surface to the user later
@@ -2332,81 +2327,14 @@ impl pkg::InputsPackager for RustInputsPackager {
                     true
                 });
 
-                Ok::<_, anyhow::Error>((dirs, files, links, inputs, pt))
+                Ok::<_, anyhow::Error>((contents, inputs, pt))
             }
         })
         .await??;
 
         *path_transformer = pt;
 
-        let (mut digest, files, inputs) = futures::stream::iter(files)
-            .flat_map_unordered(None, |(dist_path, file_path)| {
-                futures::stream::once(Box::pin(async move {
-                    let dist_path = path_to_str(dist_path)?.into_owned();
-                    let file_hash = Digest::from_file(&file_path).await?.finish();
-                    Ok::<_, anyhow::Error>((dist_path, (file_hash, file_path)))
-                }))
-            })
-            .try_collect::<BTreeMap<_, _>>()
-            .await?
-            .into_iter()
-            .fold(
-                (Digest::new(), BTreeMap::new(), inputs),
-                |(mut digest, mut files, mut inputs), (dist_path, (file_hash, file_path))| {
-                    digest.update(file_hash.as_bytes());
-                    digest.update(dist_path.as_bytes());
-                    if let Ok(file_path) = path_to_str(&file_path) {
-                        digest.update(file_path.as_bytes());
-                    }
-                    files.insert(dist_path, file_hash.clone());
-                    inputs.insert(file_hash, JobInput::File(file_path));
-                    (digest, files, inputs)
-                },
-            );
-
-        let dirs = dirs
-            .into_iter()
-            .map(|(dist_path, dir_path)| {
-                let dist_path = path_to_str(dist_path)?;
-                let dir_path = path_to_str(dir_path)?;
-                digest.update(dist_path.as_bytes());
-                digest.update(dir_path.as_bytes());
-                Ok::<_, anyhow::Error>(dist_path.into_owned())
-            })
-            .try_collect::<_, Vec<_>, _>()?;
-
-        let links = links
-            .into_iter()
-            .map(|(dist_path, (link_name, link_path))| {
-                let dist_path = path_to_str(dist_path)?;
-                let link_name = path_to_str(link_name)?;
-                let link_path = path_to_str(link_path)?;
-                digest.update(dist_path.as_bytes());
-                digest.update(link_name.as_bytes());
-                digest.update(link_path.as_bytes());
-                Ok::<_, anyhow::Error>((dist_path.into_owned(), link_path.into_owned()))
-            })
-            .try_collect::<_, BTreeMap<_, _>, _>()?;
-
-        // trace!(
-        //     "Dist inputs:\n{}",
-        //     std::iter::empty()
-        //         .chain(dirs.iter().map(|p| format!("  dir: {p}")))
-        //         .chain(links.iter().map(|(s, t)| format!("  link: {s} -> {t}")))
-        //         .chain(files.iter().map(|(p, h)| format!("  file: {p} ({h})")))
-        //         .unique()
-        //         .collect::<Vec<_>>()
-        //         .join("\n")
-        // );
-
-        let manifest = dist::JobInputs::Manifest {
-            hash: digest.finish(),
-            dirs,
-            files,
-            links,
-        };
-
-        Ok::<_, anyhow::Error>((manifest, inputs))
+        Ok::<_, anyhow::Error>((contents, inputs))
     }
 }
 
