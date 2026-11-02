@@ -1021,6 +1021,27 @@ where
         self.queued_compilations.increment()
     }
 
+    pub async fn increment_pending_compilations_guarded(&self) -> SccacheGaugeIncrement {
+        loop {
+            match self
+                .pending_compilations
+                .increment_if(|pending_compilations| {
+                    pending_compilations < self.pending_compilations_limit
+                }) {
+                Ok(pending) => {
+                    break pending;
+                }
+                Err(_) => {
+                    // Jitter so not every task retries at the same time
+                    tokio::time::sleep(tokio_retry2::strategy::jitter_range(0.0, 5.0)(
+                        Duration::from_secs(1),
+                    ))
+                    .await;
+                }
+            }
+        }
+    }
+
     pub fn pending_cache_lookups(&self) -> u64 {
         self.pending_cache_lookups.value()
     }
@@ -1435,78 +1456,57 @@ where
     /// the initial information and an optional body which will eventually
     /// contain the results of the compilation.
     async fn handle_compile(&self, mut compile: Compile) -> SccacheResponse {
-        let pending = if cfg!(not(feature = "dist-client")) {
-            self.increment_pending_compilations()
-        } else {
-            // Limit the number of concurrent compile requests that are in the
-            // pre-compilation stage to `self.num_cpus`.
-            //
-            // `stats.pending_compilations` is the number of compile requests that have
-            // been submitted to the server but have not started compiling yet. In other
-            // words, compile requests that are in the preprocess or `generate_hash_key`
-            // stages (collectively, the pre-compilation stages).
-            //
-            // When the client is configured for local compilation, this has no impact
-            // on job throughput, since subprocess invocation is already guarded by the
-            // jobserver's semaphore.
-            //
-            // If the client is configured for distributed compilation, this gives the
-            // client time to send the `new_job`/`run_job` requests to the build cluster
-            // as soon as they're done with the pre-compilation stages.
-            //
-            // Without this, all the incoming pre-compilation tasks are interleaved,
-            // because tokio's scheduler is fair/breadth-first. The implication is all
-            // the compile requests are preprocessed at roughly the same time, then all
-            // their hash keys are computed, then all cache lookups occur, and finally
-            // all the cache misses are compiled.
-            //
-            // This is a problem in massively parallel (`make -j$(ulimit -n)`)
-            // distributed compilations -- especially with CUDA in the mix, because that
-            // fans out into potentially many parallel subcompilations.
-            //
-            // We don't want to peg the client's CPU at ~100% preprocessing every file,
-            // generating all hash keys, whipping up a cache lookup request storm, etc.
-            // before any jobs are sent to the build cluster.
-            //
-            // Jobs should be sent to the build cluster as soon as we know they're not
-            // in the cache. Then we can handle more compile requests while the build
-            // cluster is busy.
-            //
-            // So this loop is effectively a semaphore, but not implemented with an
-            // actual Semaphore because we need to introduce a short a delay before
-            // "unlocking".
-            //
-            // Why is that? Good question.
-            //
-            // The "lock" for a compile request is "released" just before the first
-            // async call of a compilation phase starts. But with a CUDA compilation,
-            // a re-entrant subcompilation is scheduled, which should take precedence
-            // over (and continue to block) processing another outer compile request.
-            //
-            // Delaying a short amount of time here is an approximation of this logic.
-            // It's unlikely the CUDA subcompilation will land exactly on a timeout
-            // boundary and be scheduled after the next outer compile request. But
-            // even if a few sometimes do, most won't, which is good enough.
-            let _queued = self.increment_queued_compilations();
-            loop {
-                match self
-                    .pending_compilations
-                    .increment_if(|pending_compilations| {
-                        pending_compilations < self.pending_compilations_limit
-                    }) {
-                    Ok(pending) => {
-                        break pending;
-                    }
-                    Err(_) => {
-                        // Jitter so not every task retries at the same time
-                        tokio::time::sleep(tokio_retry2::strategy::jitter_range(0.0, 5.0)(
-                            Duration::from_secs(1),
-                        ))
-                        .await;
-                    }
-                }
-            }
-        };
+        // Limit the number of concurrent compile requests that are in the
+        // pre-compilation stage to `self.num_cpus`.
+        //
+        // `stats.pending_compilations` is the number of compile requests that have
+        // been submitted to the server but have not started compiling yet. In other
+        // words, compile requests that are in the preprocess or `generate_hash_key`
+        // stages (collectively, the pre-compilation stages).
+        //
+        // When the client is configured for local compilation, this has no impact
+        // on job throughput, since subprocess invocation is already guarded by the
+        // jobserver's semaphore.
+        //
+        // If the client is configured for distributed compilation, this gives the
+        // client time to send the `new_job`/`run_job` requests to the build cluster
+        // as soon as they're done with the pre-compilation stages.
+        //
+        // Without this, all the incoming pre-compilation tasks are interleaved,
+        // because tokio's scheduler is fair/breadth-first. The implication is all
+        // the compile requests are preprocessed at roughly the same time, then all
+        // their hash keys are computed, then all cache lookups occur, and finally
+        // all the cache misses are compiled.
+        //
+        // This is a problem in massively parallel (`make -j$(ulimit -n)`)
+        // distributed compilations -- especially with CUDA in the mix, because that
+        // fans out into potentially many parallel subcompilations.
+        //
+        // We don't want to peg the client's CPU at ~100% preprocessing every file,
+        // generating all hash keys, whipping up a cache lookup request storm, etc.
+        // before any jobs are sent to the build cluster.
+        //
+        // Jobs should be sent to the build cluster as soon as we know they're not
+        // in the cache. Then we can handle more compile requests while the build
+        // cluster is busy.
+        //
+        // So this loop is effectively a semaphore, but not implemented with an
+        // actual Semaphore because we need to introduce a short a delay before
+        // "unlocking".
+        //
+        // Why is that? Good question.
+        //
+        // The "lock" for a compile request is "released" just before the first
+        // async call of a compilation phase starts. But with a CUDA compilation,
+        // a re-entrant subcompilation is scheduled, which should take precedence
+        // over (and continue to block) processing another outer compile request.
+        //
+        // Delaying a short amount of time here is an approximation of this logic.
+        // It's unlikely the CUDA subcompilation will land exactly on a timeout
+        // boundary and be scheduled after the next outer compile request. But
+        // even if a few sometimes do, most won't, which is good enough.
+        let _queued = self.increment_queued_compilations();
+        let pending = self.increment_pending_compilations_guarded().await;
 
         let args = compile.args;
         compile.args = compiler_info_args(&args);
