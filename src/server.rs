@@ -2315,7 +2315,8 @@ impl ServerStats {
             self.pending_cache_lookups,
             "Pending cache lookups"
         );
-        if self.uploading_compilations > 0 {
+        if self.uploading_compilations > 0 || self.dist_errors > 0 || !self.dist_compiles.is_empty()
+        {
             set_stat!(
                 stats_vec,
                 self.uploading_compilations,
