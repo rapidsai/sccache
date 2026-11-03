@@ -553,7 +553,7 @@ mod server {
     };
     use async_trait::async_trait;
     use flate2::bufread::{MultiGzDecoder as GzipDecoder, ZlibDecoder};
-    use fs_err as fs;
+    use fs_err::{self as fs, os::unix::fs::OpenOptionsExt};
     use itertools::Itertools;
     use std::{
         collections::{BTreeMap, BTreeSet},
@@ -829,7 +829,12 @@ mod server {
                                         fs::create_dir_all(join_suffix(&base, path))?;
                                     }
                                     let path = join_suffix(&base, path);
-                                    let mut inflated_file = fs::File::create(path)?;
+                                    let mut inflated_file = fs::OpenOptions::new()
+                                        .create(true)
+                                        .write(true)
+                                        .mode(0o755)
+                                        .truncate(true)
+                                        .open(path)?;
                                     let mut reader = ZlibDecoder::new(data.clone());
                                     std::io::copy(&mut reader, &mut inflated_file)
                                         .map(|file_size| inflated_size + file_size)
