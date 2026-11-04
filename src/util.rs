@@ -2032,8 +2032,9 @@ where
 
             state.insert(hash.clone(), sndr);
 
-            // Run the function on a worker thread
-            tokio::spawn({
+            // Run the function on a worker thread. Boxed so every `AsyncMulticast<K, V>`
+            // shares one tokio task type instead of instantiating tokio's task harness for each.
+            let task: futures::future::BoxFuture<'static, ()> = Box::pin({
                 let run_f = self.run_f.clone();
                 let state = self.state.clone();
                 async move {
@@ -2052,6 +2053,7 @@ where
                     }
                 }
             });
+            tokio::spawn(task);
 
             recv
         };

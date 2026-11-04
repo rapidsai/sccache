@@ -34,7 +34,10 @@ mod common {
     where
         T: for<'de> serde::Deserialize<'de> + Send + 'static,
     {
-        tokio::task::spawn_blocking(move || bincode::deserialize_from(bytes.reader()))
+        // Boxed so all `T`s share one blocking task type.
+        let task: Box<dyn FnOnce() -> bincode::Result<T> + Send> =
+            Box::new(move || bincode::deserialize_from(bytes.reader()));
+        tokio::task::spawn_blocking(task)
             .await
             .map_err(anyhow::Error::new)?
             .map_err(anyhow::Error::new)
@@ -44,7 +47,10 @@ mod common {
     where
         T: serde::Serialize + Send + 'static,
     {
-        tokio::task::spawn_blocking(move || bincode::serialize(&value))
+        // Boxed so all `T`s share one blocking task type.
+        let task: Box<dyn FnOnce() -> bincode::Result<Vec<u8>> + Send> =
+            Box::new(move || bincode::serialize(&value));
+        tokio::task::spawn_blocking(task)
             .await
             .map_err(anyhow::Error::new)?
             .map_err(anyhow::Error::new)
