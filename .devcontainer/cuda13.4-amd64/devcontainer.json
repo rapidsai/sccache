@@ -60,7 +60,11 @@
     "ghcr.io/devcontainers/features/docker-outside-of-docker:1.6.5": {
       "moby": "false"
     },
-    "ghcr.io/rapidsai/devcontainers/features/gcc:latest": {},
+    "ghcr.io/rapidsai/devcontainers/features/cmake:latest": {},
+    "ghcr.io/rapidsai/devcontainers/features/ninja:latest": {},
+    "ghcr.io/rapidsai/devcontainers/features/gcc:latest": {
+        "version": "14"
+    },
     "ghcr.io/rapidsai/devcontainers/features/llvm:latest": {
       "version": "23"
     },
@@ -82,6 +86,8 @@
     "ghcr.io/devcontainers/features/git",
     "ghcr.io/devcontainers/features/github-cli",
     "ghcr.io/devcontainers/features/docker-outside-of-docker",
+    "ghcr.io/rapidsai/devcontainers/features/cmake",
+    "ghcr.io/rapidsai/devcontainers/features/ninja",
     "ghcr.io/rapidsai/devcontainers/features/gcc",
     "ghcr.io/rapidsai/devcontainers/features/llvm",
     "ghcr.io/rapidsai/devcontainers/features/cuda"
