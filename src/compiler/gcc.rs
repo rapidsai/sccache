@@ -18,8 +18,9 @@ use crate::{
         SingleCompileCommand,
         args::*,
         c::{
-            ArtifactDescriptor, CCompilerImpl, CCompilerKind, GenerateCompileCommandsArgs,
-            GenerateDependenciesArgs, P1689r5_JSON, ParseArgs, ParsedArguments,
+            AnyCompileCommand, ArtifactDescriptor, CCompilerImpl, CCompilerKind,
+            GenerateCompileCommandsArgs, GenerateDependenciesArgs, P1689r5_JSON, ParseArgs,
+            ParsedArguments,
         },
         clang,
     },
@@ -298,7 +299,7 @@ impl CCompilerImpl for Gcc {
             ..
         }: GenerateCompileCommandsArgs<'_>,
     ) -> Result<(
-        impl CompileCommandImpl,
+        impl CompileCommandImpl + Into<AnyCompileCommand>,
         Option<dist::CompileCommand>,
         Cacheable,
     )> {

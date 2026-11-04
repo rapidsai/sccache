@@ -17,7 +17,19 @@ use crate::{
     compiler::{
         CacheControl, Cacheable, ColorMode, Compilation, CompileCommand, CompileCommandImpl,
         Compiler, CompilerArguments, CompilerHasher, CompilerKind, GenerateHashKeyArgs, HashResult,
-        Language,
+        Language, SingleCompileCommand,
+        cicc::Cicc,
+        clang::Clang,
+        cudafe::CudaFE,
+        diab::Diab,
+        gcc::Gcc,
+        llc::Llc,
+        msvc::Msvc,
+        nvcc::{Nvcc, NvccCompileCommand},
+        nvhpc::Nvhpc,
+        ptxas::Ptxas,
+        tasking_vx::TaskingVX,
+        tileiras::Tileiras,
         util::{
             CSourceFileCache, DEPS_VERSION, Dependencies, HiddenIncludes, SourceFileDeps,
             SourceFileEntry,
@@ -371,10 +383,157 @@ pub trait CCompilerImpl: Clone + fmt::Debug + Send + Sync + 'static {
         &self,
         args: GenerateCompileCommandsArgs<'_>,
     ) -> Result<(
-        impl CompileCommandImpl,
+        impl CompileCommandImpl + Into<AnyCompileCommand>,
         Option<dist::CompileCommand>,
         Cacheable,
     )>;
+}
+
+// Compiler detection wraps every C compiler in this enum so that `CCompiler<I>`,
+// `CCompilerHasher<I>`, `CCompilation<I, T>` and their large async state machines
+// are monomorphized once rather than once per compiler, which otherwise accounts
+// for a large share of the crate's compile time. New C compilers belong here too.
+#[derive(Clone, Debug)]
+pub enum AnyCCompiler {
+    Cicc(Cicc),
+    Clang(Clang),
+    CudaFE(CudaFE),
+    Diab(Diab),
+    Gcc(Gcc),
+    Llc(Llc),
+    Msvc(Msvc),
+    Nvcc(Nvcc),
+    Nvhpc(Nvhpc),
+    Ptxas(Ptxas),
+    TaskingVX(TaskingVX),
+    Tileiras(Tileiras),
+}
+
+macro_rules! dispatch_c_compiler {
+    ($self:expr, $c:ident => $body:expr) => {
+        match $self {
+            AnyCCompiler::Cicc($c) => $body,
+            AnyCCompiler::Clang($c) => $body,
+            AnyCCompiler::CudaFE($c) => $body,
+            AnyCCompiler::Diab($c) => $body,
+            AnyCCompiler::Gcc($c) => $body,
+            AnyCCompiler::Llc($c) => $body,
+            AnyCCompiler::Msvc($c) => $body,
+            AnyCCompiler::Nvcc($c) => $body,
+            AnyCCompiler::Nvhpc($c) => $body,
+            AnyCCompiler::Ptxas($c) => $body,
+            AnyCCompiler::TaskingVX($c) => $body,
+            AnyCCompiler::Tileiras($c) => $body,
+        }
+    };
+}
+
+macro_rules! any_c_compiler_from {
+    ($($variant:ident),*) => {
+        $(impl From<$variant> for AnyCCompiler {
+            fn from(c: $variant) -> Self {
+                AnyCCompiler::$variant(c)
+            }
+        })*
+    };
+}
+
+any_c_compiler_from!(
+    Cicc, Clang, CudaFE, Diab, Gcc, Llc, Msvc, Nvcc, Nvhpc, Ptxas, TaskingVX, Tileiras
+);
+
+#[async_trait]
+impl CCompilerImpl for AnyCCompiler {
+    fn kind(&self) -> CCompilerKind {
+        dispatch_c_compiler!(self, c => c.kind())
+    }
+    fn plusplus(&self) -> bool {
+        dispatch_c_compiler!(self, c => c.plusplus())
+    }
+    fn version(&self) -> Option<String> {
+        dispatch_c_compiler!(self, c => c.version())
+    }
+    fn extra_dist_files(&self) -> impl Iterator<Item = PathBuf> {
+        dispatch_c_compiler!(self, c => c.extra_dist_files().collect::<Vec<_>>()).into_iter()
+    }
+    fn assembler_digest(&self) -> Option<&str> {
+        dispatch_c_compiler!(self, c => c.assembler_digest())
+    }
+    fn parse_arguments(&self, args: ParseArgs<'_>) -> CompilerArguments<ParsedArguments> {
+        dispatch_c_compiler!(self, c => c.parse_arguments(args))
+    }
+    async fn generate_dependencies<T>(
+        &self,
+        args: GenerateDependenciesArgs<'_, T>,
+    ) -> Result<(Vec<PathBuf>, Duration)>
+    where
+        T: CommandCreatorSync,
+    {
+        dispatch_c_compiler!(self, c => c.generate_dependencies(args).await)
+    }
+    fn generate_compile_commands(
+        &self,
+        args: GenerateCompileCommandsArgs<'_>,
+    ) -> Result<(
+        impl CompileCommandImpl + Into<AnyCompileCommand>,
+        Option<dist::CompileCommand>,
+        Cacheable,
+    )> {
+        dispatch_c_compiler!(self, c => c.generate_compile_commands(args).map(
+            |(cmd, dist_cmd, cacheable)| {
+                (Into::<AnyCompileCommand>::into(cmd), dist_cmd, cacheable)
+            }
+        ))
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum AnyCompileCommand {
+    Single(SingleCompileCommand),
+    Nvcc(NvccCompileCommand),
+}
+
+impl From<SingleCompileCommand> for AnyCompileCommand {
+    fn from(cmd: SingleCompileCommand) -> Self {
+        AnyCompileCommand::Single(cmd)
+    }
+}
+
+impl From<NvccCompileCommand> for AnyCompileCommand {
+    fn from(cmd: NvccCompileCommand) -> Self {
+        AnyCompileCommand::Nvcc(cmd)
+    }
+}
+
+macro_rules! dispatch_compile_command {
+    ($self:expr, $c:ident => $body:expr) => {
+        match $self {
+            AnyCompileCommand::Single($c) => $body,
+            AnyCompileCommand::Nvcc($c) => $body,
+        }
+    };
+}
+
+#[async_trait]
+impl CompileCommandImpl for AnyCompileCommand {
+    fn get_executable(&self) -> PathBuf {
+        dispatch_compile_command!(self, c => c.get_executable())
+    }
+    fn get_arguments(&self) -> Vec<OsString> {
+        dispatch_compile_command!(self, c => c.get_arguments())
+    }
+    fn get_env_vars(&self) -> Vec<(OsString, OsString)> {
+        dispatch_compile_command!(self, c => c.get_env_vars())
+    }
+    fn get_cwd(&self) -> PathBuf {
+        dispatch_compile_command!(self, c => c.get_cwd())
+    }
+    async fn execute<T>(&self, service: &SccacheService<T>, creator: &T) -> Result<ProcessOutput>
+    where
+        T: CommandCreatorSync,
+    {
+        dispatch_compile_command!(self, c => c.execute(service, creator).await)
+    }
 }
 
 impl<I> CCompiler<I>

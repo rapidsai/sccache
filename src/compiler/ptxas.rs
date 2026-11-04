@@ -16,8 +16,8 @@
 use crate::{
     compiler::{
         c::{
-            CCompilerImpl, CCompilerKind, GenerateCompileCommandsArgs, GenerateDependenciesArgs,
-            ParseArgs, ParsedArguments,
+            AnyCompileCommand, CCompilerImpl, CCompilerKind, GenerateCompileCommandsArgs,
+            GenerateDependenciesArgs, ParseArgs, ParsedArguments,
         },
         cicc, {Cacheable, CompilerArguments, Language},
         {CompileCommandImpl, args::*},
@@ -74,7 +74,7 @@ impl CCompilerImpl for Ptxas {
             ..
         }: GenerateCompileCommandsArgs<'_>,
     ) -> Result<(
-        impl CompileCommandImpl,
+        impl CompileCommandImpl + Into<AnyCompileCommand>,
         Option<dist::CompileCommand>,
         Cacheable,
     )> {

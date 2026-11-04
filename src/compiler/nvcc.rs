@@ -18,8 +18,9 @@ use crate::{
         Cacheable, CompileCommandImpl, CompilerArguments,
         args::*,
         c::{
-            ArtifactDescriptor, CCompilerImpl, CCompilerKind, GenerateCompileCommandsArgs,
-            GenerateDependenciesArgs, OutDir, ParseArgs, ParsedArguments,
+            AnyCompileCommand, ArtifactDescriptor, CCompilerImpl, CCompilerKind,
+            GenerateCompileCommandsArgs, GenerateDependenciesArgs, OutDir, ParseArgs,
+            ParsedArguments,
         },
         gcc::{self, ArgData::*},
     },
@@ -671,7 +672,7 @@ impl CCompilerImpl for Nvcc {
             ..
         }: GenerateCompileCommandsArgs<'_>,
     ) -> Result<(
-        impl CompileCommandImpl,
+        impl CompileCommandImpl + Into<AnyCompileCommand>,
         Option<dist::CompileCommand>,
         Cacheable,
     )> {
@@ -898,7 +899,7 @@ impl From<&OsStr> for NvccCompileFlag {
 }
 
 #[derive(Clone, Debug)]
-struct NvccCompileCommand {
+pub(crate) struct NvccCompileCommand {
     out_dir: Arc<OutDir>,
     keep_dir: Option<PathBuf>,
     num_parallel: usize,

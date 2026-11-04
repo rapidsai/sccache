@@ -22,8 +22,8 @@ use crate::{
             NormalizedDisposition, PathTransformerFn, SearchableArgInfo,
         },
         c::{
-            ArtifactDescriptor, CCompilerImpl, CCompilerKind, GenerateCompileCommandsArgs,
-            GenerateDependenciesArgs, ParseArgs, ParsedArguments,
+            AnyCompileCommand, ArtifactDescriptor, CCompilerImpl, CCompilerKind,
+            GenerateCompileCommandsArgs, GenerateDependenciesArgs, ParseArgs, ParsedArguments,
         },
         gcc,
     },
@@ -96,7 +96,7 @@ impl CCompilerImpl for Diab {
             ..
         }: GenerateCompileCommandsArgs<'_>,
     ) -> Result<(
-        impl CompileCommandImpl,
+        impl CompileCommandImpl + Into<AnyCompileCommand>,
         Option<dist::CompileCommand>,
         Cacheable,
     )> {

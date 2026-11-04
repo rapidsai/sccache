@@ -18,8 +18,8 @@ use crate::{
         Cacheable, CompileCommandImpl, CompilerArguments, Language, SingleCompileCommand,
         args::*,
         c::{
-            ArtifactDescriptor, CCompilerImpl, CCompilerKind, GenerateCompileCommandsArgs,
-            GenerateDependenciesArgs, ParseArgs, ParsedArguments,
+            AnyCompileCommand, ArtifactDescriptor, CCompilerImpl, CCompilerKind,
+            GenerateCompileCommandsArgs, GenerateDependenciesArgs, ParseArgs, ParsedArguments,
         },
     },
     counted_array, dist,
@@ -77,7 +77,7 @@ impl CCompilerImpl for Cicc {
             ..
         }: GenerateCompileCommandsArgs<'_>,
     ) -> Result<(
-        impl CompileCommandImpl,
+        impl CompileCommandImpl + Into<AnyCompileCommand>,
         Option<dist::CompileCommand>,
         Cacheable,
     )> {

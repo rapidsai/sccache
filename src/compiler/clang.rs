@@ -17,8 +17,8 @@ use crate::{
         Cacheable, CompileCommandImpl, CompilerArguments,
         args::*,
         c::{
-            CCompilerImpl, CCompilerKind, GenerateCompileCommandsArgs, GenerateDependenciesArgs,
-            ParseArgs, ParsedArguments,
+            AnyCompileCommand, CCompilerImpl, CCompilerKind, GenerateCompileCommandsArgs,
+            GenerateDependenciesArgs, ParseArgs, ParsedArguments,
         },
         gcc::{self, ArgData::*},
     },
@@ -146,7 +146,7 @@ impl CCompilerImpl for Clang {
             ..
         }: GenerateCompileCommandsArgs<'_>,
     ) -> Result<(
-        impl CompileCommandImpl,
+        impl CompileCommandImpl + Into<AnyCompileCommand>,
         Option<dist::CompileCommand>,
         Cacheable,
     )> {

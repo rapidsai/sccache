@@ -18,8 +18,8 @@ use crate::{
         SingleCompileCommand,
         args::*,
         c::{
-            ArtifactDescriptor, CCompilerImpl, CCompilerKind, GenerateCompileCommandsArgs,
-            GenerateDependenciesArgs, ParseArgs, ParsedArguments,
+            AnyCompileCommand, ArtifactDescriptor, CCompilerImpl, CCompilerKind,
+            GenerateCompileCommandsArgs, GenerateDependenciesArgs, ParseArgs, ParsedArguments,
         },
         clang, gcc, write_temp_file,
     },
@@ -148,7 +148,7 @@ impl CCompilerImpl for Msvc {
             ..
         }: GenerateCompileCommandsArgs<'_>,
     ) -> Result<(
-        impl CompileCommandImpl,
+        impl CompileCommandImpl + Into<AnyCompileCommand>,
         Option<dist::CompileCommand>,
         Cacheable,
     )> {

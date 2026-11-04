@@ -20,7 +20,7 @@ use crate::{
     cache::{Cache, CacheRead, CacheWrite, DecompressionFailure, FileObjectSource, Storage},
     compiler::{
         args::*,
-        c::{CCompiler, CCompilerKind},
+        c::{AnyCCompiler, CCompiler, CCompilerKind},
         cicc::Cicc,
         clang::Clang,
         cudafe::CudaFE,
@@ -2250,9 +2250,9 @@ where
         match name.as_str() {
             "cudafe++" => {
                 return CCompiler::new(
-                    CudaFE {
+                    AnyCCompiler::from(CudaFE {
                         version: Some(nvcc_version),
-                    },
+                    }),
                     executable,
                     vec![],
                 )
@@ -2261,9 +2261,9 @@ where
             }
             "cicc" => {
                 return CCompiler::new(
-                    Cicc {
+                    AnyCCompiler::from(Cicc {
                         version: Some(nvcc_version),
-                    },
+                    }),
                     executable,
                     vec![],
                 )
@@ -2272,9 +2272,9 @@ where
             }
             "ptxas" => {
                 return CCompiler::new(
-                    Ptxas {
+                    AnyCCompiler::from(Ptxas {
                         version: Some(nvcc_version),
-                    },
+                    }),
                     executable,
                     vec![],
                 )
@@ -2283,9 +2283,9 @@ where
             }
             "tileiras" => {
                 return CCompiler::new(
-                    Tileiras {
+                    AnyCCompiler::from(Tileiras {
                         version: Some(nvcc_version),
-                    },
+                    }),
                     executable,
                     vec![],
                 )
@@ -2307,9 +2307,9 @@ where
         trace!("Found llc  (version: {version})");
 
         return CCompiler::new(
-            Llc {
+            AnyCCompiler::from(Llc {
                 version: Some(version),
-            },
+            }),
             executable,
             vec![],
         )
@@ -2777,13 +2777,13 @@ compiler_version=__VERSION__
                         .await;
 
                 return CCompiler::new(
-                    Clang::new(
+                    AnyCCompiler::from(Clang::new(
                         kind.ends_with("++"), // clangplusplus
                         // kind.starts_with("apple-"), // is_appleclang
                         version, // version
                         assembler_digest,
                         Clang::find_extra_gcc_toolchain_markers(&executable),
-                    ),
+                    )),
                     executable,
                     vec![],
                 )
@@ -2792,7 +2792,7 @@ compiler_version=__VERSION__
             }
             "diab" => {
                 trace!("Found {kind} (version: {})", version.as_ref().unwrap());
-                return CCompiler::new(Diab { version }, executable, vec![])
+                return CCompiler::new(AnyCCompiler::from(Diab { version }), executable, vec![])
                     .await
                     .map(|c| Box::new(c) as Box<dyn Compiler<T>>);
             }
@@ -2814,7 +2814,7 @@ compiler_version=__VERSION__
 
                 let specfiles = gcc.specfiles.clone();
 
-                return CCompiler::new(gcc, executable, specfiles)
+                return CCompiler::new(AnyCCompiler::from(gcc), executable, specfiles)
                     .await
                     .map(|c| Box::new(c) as Box<dyn Compiler<T>>);
             }
@@ -2832,11 +2832,11 @@ compiler_version=__VERSION__
                 trace!("showIncludes prefix: '{includes_prefix}'");
 
                 return CCompiler::new(
-                    Msvc {
+                    AnyCCompiler::from(Msvc {
                         includes_prefix,
                         is_clang,
                         version,
-                    },
+                    }),
                     executable,
                     vec![],
                 )
@@ -2875,8 +2875,8 @@ compiler_version=__VERSION__
                 )
                 .await?;
 
-                let nvcc = CCompiler::new(nvcc, executable, vec![]).await?;
-                let hashes = crate::util::hash_all(&nvcc.compiler().nvcc_tools).await?;
+                let hashes = crate::util::hash_all(&nvcc.nvcc_tools).await?;
+                let nvcc = CCompiler::new(AnyCCompiler::from(nvcc), executable, vec![]).await?;
                 return Ok(Box::new(nvcc.with_extra_hashes(hashes)) as Box<dyn Compiler<T>>);
             }
             "nvc++" | "nvc" => {
@@ -2915,12 +2915,12 @@ compiler_version=__VERSION__
                 };
 
                 return CCompiler::new(
-                    Nvhpc {
+                    AnyCCompiler::from(Nvhpc {
                         nvcplusplus: kind == "nvc++",
                         openmpi,
                         version,
                         native_arch,
-                    },
+                    }),
                     executable,
                     vec![],
                 )
@@ -2929,7 +2929,7 @@ compiler_version=__VERSION__
             }
             "tasking_vx" => {
                 trace!("Found Tasking VX");
-                return CCompiler::new(TaskingVX, executable, vec![])
+                return CCompiler::new(AnyCCompiler::from(TaskingVX), executable, vec![])
                     .await
                     .map(|c| Box::new(c) as Box<dyn Compiler<T>>);
             }
@@ -3136,14 +3136,17 @@ mod test {
         assert_eq!(CompilerKind::C(CCompilerKind::Gcc), c2.kind());
 
         if let (Ok(c1), Ok(c2)) = (
-            c1.into_any().downcast::<CCompiler<Gcc>>(),
-            c2.into_any().downcast::<CCompiler<Gcc>>(),
+            c1.into_any().downcast::<CCompiler<AnyCCompiler>>(),
+            c2.into_any().downcast::<CCompiler<AnyCCompiler>>(),
         ) {
             assert_ne!(c1.executable_digest, c2.executable_digest);
 
             use crate::compiler::c::CCompilerImpl;
 
-            match c1.compiler().parse_arguments(ParseArgs {
+            let AnyCCompiler::Gcc(gcc) = c1.compiler() else {
+                panic!("expected gcc, got {:?}", c1.compiler());
+            };
+            match gcc.parse_arguments(ParseArgs {
                 arguments: ovec![
                     "-c",
                     "foo.cxx",
@@ -3423,10 +3426,15 @@ mod test {
             .unwrap()
             .0;
         assert_eq!(CompilerKind::C(CCompilerKind::Nvhpc), c.kind());
-        if let Ok(nvcxx) = c.into_any().downcast::<CCompiler<Nvhpc>>() {
-            assert!(nvcxx.compiler().openmpi, "openmpi is true");
-            assert!(nvcxx.compiler().nvcplusplus, "nvcplusplus is true");
-        }
+        let nvcxx = c
+            .into_any()
+            .downcast::<CCompiler<AnyCCompiler>>()
+            .expect("CCompiler<AnyCCompiler>");
+        let AnyCCompiler::Nvhpc(nvcxx) = nvcxx.compiler() else {
+            panic!("expected nvhpc, got {:?}", nvcxx.compiler());
+        };
+        assert!(nvcxx.openmpi, "openmpi is true");
+        assert!(nvcxx.nvcplusplus, "nvcplusplus is true");
     }
 
     #[test]
