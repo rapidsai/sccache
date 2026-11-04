@@ -1941,18 +1941,16 @@ fn fold_env_vars_or_split_into_exe_and_args(
     if let Some((var, val)) = line.split_once("=")
         && var.chars().all(|b| b.is_ascii_alphabetic() || b == '_')
     {
-        env_vars_nvcc.entry(var.into()).or_insert_with(|| {
-            (
-                val.into(),
-                if cfg!(target_os = "windows") {
-                    // %CICC_PATH%
-                    format!(r#"%{var}%"#)
-                } else {
-                    // $CICC_PATH
-                    format!(r#"${var}"#)
-                },
-            )
-        });
+        *env_vars_nvcc.entry(var.into()).or_default() = (
+            val.into(),
+            if cfg!(target_os = "windows") {
+                // %CICC_PATH%
+                format!(r#"%{var}%"#)
+            } else {
+                // $CICC_PATH
+                format!(r#"${var}"#)
+            },
+        );
 
         return None;
     }
