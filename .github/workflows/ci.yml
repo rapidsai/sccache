@@ -408,7 +408,7 @@ jobs:
 
       - name: Build (s390x-musl with build-std)
         if: ${{ matrix.target == 's390x-unknown-linux-musl' }}
-        run: cargo +nightly build --locked --release --bin ${{ matrix.binary || 'sccache' }} --target ${{ matrix.target }} --features=openssl/vendored ${{ matrix.extra_args }} -Zbuild-std
+        run: cargo +nightly build --locked --release --bin ${{ matrix.binary || 'sccache' }} --target ${{ matrix.target }} --features=vendored-openssl ${{ matrix.extra_args }} -Zbuild-std
         env:
           MACOSX_DEPLOYMENT_TARGET: ${{ matrix.macosx_deployment_target }}
           DEVELOPER_DIR: ${{ matrix.developer_dir }}
@@ -418,7 +418,7 @@ jobs:
 
       - name: Build
         if: ${{ matrix.target != 's390x-unknown-linux-musl' }}
-        run: cargo build --locked --release --bin ${{ matrix.binary || 'sccache' }} --target ${{ matrix.target }} --features=openssl/vendored ${{ matrix.extra_args }}
+        run: cargo build --locked --release --bin ${{ matrix.binary || 'sccache' }} --target ${{ matrix.target }} --features=vendored-openssl ${{ matrix.extra_args }}
         env:
           MACOSX_DEPLOYMENT_TARGET: ${{ matrix.macosx_deployment_target }}
           DEVELOPER_DIR: ${{ matrix.developer_dir }}
