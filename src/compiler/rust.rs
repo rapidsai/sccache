@@ -1471,6 +1471,14 @@ where
             m.update(d.as_bytes());
         }
         let weak_toolchain_key = m.clone().finish();
+        // A rustc toolchain may have identical shared libraries across machines, but be installed
+        // in separate places. That means the toolchain archive will not contain the correct path
+        // to invoke rustc! Add the executable path to the weak key to try and prevent this.
+        let weak_toolchain_key = format!(
+            "{}-{}",
+            self.executable.to_string_lossy(),
+            weak_toolchain_key
+        );
 
         preprocess_duration += hash_start.elapsed();
 
