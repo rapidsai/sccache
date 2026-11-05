@@ -7,5 +7,6 @@ for TOOLCHAIN in "$RUST_VERSION" stable nightly; do
     rustup toolchain install "$TOOLCHAIN" --profile minimal -c clippy -c rustfmt -t "$CARGO_BUILD_TARGET"
 done
 
-rustup override set "$RUST_VERSION"
+# rustup override set "$RUST_VERSION"
+rustup override set stable
 rustup target add "$CARGO_BUILD_TARGET"

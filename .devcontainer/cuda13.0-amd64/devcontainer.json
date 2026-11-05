@@ -146,7 +146,7 @@
             "CC": "gcc",
             "CXX": "g++"
         },
-        "rust-analyzer.cargo.targetDir": true,
+        "rust-analyzer.cargo.targetDir": false,
         "rust-analyzer.checkOnSave": true,
         "search.exclude": {
           "**/build/**": true,
