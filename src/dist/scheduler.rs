@@ -392,7 +392,7 @@ impl Scheduler {
 
         match inputs {
             JobInputs::TarGZ { job_id } => {
-                if !self.jobs_io.has_job_inputs(job_id).await {
+                if !self.jobs_io.has_job_inputs(job_id).await.is_some() {
                     tracing::warn!("[run_job({job_id})]: Missing job inputs");
                     return Ok(Some(RunJobResponse::MissingJobInputs {
                         server_id: self.scheduler_id.clone(),

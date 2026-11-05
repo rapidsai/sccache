@@ -26,6 +26,7 @@ use crate::{
     },
     errors::*,
 };
+use cached::macros::cached;
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -45,7 +46,7 @@ impl Jobs {
         inputs: I,
     ) -> Option<Vec<String>> {
         let missing_inputs = crate::util::join_all(inputs.into_iter().map(|digest| async move {
-            if !self.has_job_inputs(digest).await {
+            if !self.has_job_inputs(digest).await.is_some() {
                 Some(digest.to_owned())
             } else {
                 None
@@ -64,10 +65,14 @@ impl Jobs {
     }
 
     /// Check if a job inputs exists
-    pub async fn has_job_inputs(&self, job_id: &str) -> bool {
+    #[cached(in_impl = true, sync_writes = "by_key", ttl_secs = 300)]
+    pub async fn has_job_inputs(&self, job_id: &str) -> Option<()> {
         // Record has_job_inputs time
         let _timer = self.metrics.has_job_inputs_timer();
-        self.storage.has(&job_inputs_key(job_id)).await
+        self.storage
+            .has(&job_inputs_key(job_id))
+            .await
+            .then_some(())
     }
 
     /// Check if a job result exists
