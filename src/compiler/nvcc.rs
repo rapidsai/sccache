@@ -446,8 +446,8 @@ impl CCompilerImpl for Nvcc {
         let host_ver = self
             .host_compiler_version
             .as_ref()
-            .map(|host_ver| format!(" ({:?} {host_ver})", &self.host_compiler))
-            .unwrap_or_else(|| format!(" ({:?} <unknown>)", &self.host_compiler))
+            .map(|host_ver| format!(" ({:?} {host_ver})", self.host_compiler))
+            .unwrap_or_else(|| format!(" ({:?} <unknown>)", self.host_compiler))
             .to_lowercase();
         self.version
             .as_ref()
@@ -1555,7 +1555,7 @@ fn parse_args_simple<I: IntoIterator<Item = OsString>>(args: I, cwd: &Path) -> P
 
     let input = input.map(|p| cwd.join(p)).unwrap_or_default();
 
-    for (_, p) in outputs.iter_mut() {
+    for p in outputs.values_mut() {
         *p = cwd.join(&p);
     }
 

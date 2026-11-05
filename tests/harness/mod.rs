@@ -71,7 +71,7 @@ pub fn prune_command(mut cmd: Command) -> Command {
 
 macro_rules! vec_from {
     ( $t:ty, $( $x:expr ),* ) => {
-        vec!($( Into::<$t>::into(&$x), )*)
+        vec![$( Into::<$t>::into(&$x), )*]
     };
 }
 

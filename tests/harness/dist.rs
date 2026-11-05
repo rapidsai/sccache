@@ -979,10 +979,7 @@ impl DistSystem {
                     .unwrap_or("celery=info,sccache=debug,tower_http=debug,axum::rejection=trace") // default to debug
                 ),
             ])
-            .args([
-                "-e",
-                &format!("SCCACHE_DIST_DEPLOYMENT_NAME={}", &self.name),
-            ])
+            .args(["-e", &format!("SCCACHE_DIST_DEPLOYMENT_NAME={}", self.name)])
             .args(["-e", "RUST_BACKTRACE=1"])
             .args(["--network", "host"])
             .args(["--restart", "always"])
@@ -1084,10 +1081,7 @@ impl DistSystem {
                     .unwrap_or("celery=info,sccache=debug") // default to debug
                 ),
             ])
-            .args([
-                "-e",
-                &format!("SCCACHE_DIST_DEPLOYMENT_NAME={}", &self.name),
-            ])
+            .args(["-e", &format!("SCCACHE_DIST_DEPLOYMENT_NAME={}", self.name)])
             .args(["-e", "RUST_BACKTRACE=1"])
             .args(["--network", "host"])
             .args(["--restart", "always"])

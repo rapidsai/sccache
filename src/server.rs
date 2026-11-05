@@ -1979,7 +1979,7 @@ where
             let (c, proxy) = match info {
                 Ok((c, proxy)) => (c.clone(), proxy.clone()),
                 Err(err) => {
-                    trace!("Inserting PLAIN cache map info for {:?}", &path);
+                    trace!("Inserting PLAIN cache map info for {path:?}");
                     compilers.write().await.insert(path.to_owned(), None);
                     return Err(err);
                 }
@@ -1989,10 +1989,7 @@ where
             // and the true/resolved compiler will create table hits in the hash map
             // based on the resolved path
             if let Some(proxy) = proxy {
-                trace!(
-                    "Inserting new path proxy {:?} @ {:?} -> {:?}",
-                    &path, &cwd, resolved_compiler_path
-                );
+                trace!("Inserting new path proxy {path:?} @ {cwd:?} -> {resolved_compiler_path:?}");
                 compiler_proxies
                     .write()
                     .await
@@ -2003,10 +2000,7 @@ where
 
             // cache
             let map_info = CompilerCacheEntry::new(c.clone(), mtime, dist_info);
-            trace!(
-                "Inserting POSSIBLY PROXIED cache map info for {:?}",
-                &resolved_compiler_path
-            );
+            trace!("Inserting POSSIBLY PROXIED cache map info for {resolved_compiler_path:?}");
             compilers
                 .write()
                 .await
