@@ -130,111 +130,86 @@ pub struct SourceFileMeta {
     pub ctime: Option<Timestamp>,
 }
 
-#[derive(Clone, Debug)]
-pub struct CSourceFileCache {
-    lru: Arc<Mutex<LruCache<PathBuf, Arc<SourceFileEntry>>>>,
+#[derive(Default)]
+pub struct SourceFileAnalysis {
+    pub digest: String,
+    pub has_time: bool,
+    pub has_date: bool,
+    pub has_timestamp: bool,
+    pub hidden_includes: HiddenIncludes,
 }
 
-impl CSourceFileCache {
-    pub fn new(capacity: u64) -> Self {
-        CSourceFileCache {
-            lru: Arc::new(Mutex::new(LruCache::new(capacity))),
-        }
-    }
-
-    pub async fn get(
+pub trait SourceFileAnalyzer: fmt::Debug {
+    fn analyze(
         &self,
         path: &Path,
         compile_timestamp: chrono::DateTime<chrono::Utc>,
-    ) -> Result<Arc<SourceFileEntry>> {
-        use chrono::Datelike;
+    ) -> Result<SourceFileAnalysis>;
+}
 
-        // Assumes path has been canonicalized
-        let meta = match crate::util::async_fs::symlink_metadata(path).await {
-            Ok(meta) => meta,
+#[derive(Debug)]
+pub struct CSourceFileAnalyzer;
+
+impl SourceFileAnalyzer for CSourceFileAnalyzer {
+    fn analyze(
+        &self,
+        path: &Path,
+        compile_timestamp: chrono::DateTime<chrono::Utc>,
+    ) -> Result<SourceFileAnalysis> {
+        let digest_and_finder = Digest::from_file_with_macro_finders_sync(path, compile_timestamp)
+            .with_context(|| format!("while reading '{}'", path.display()))
+            .map(|(digest, time_finder, hinc_finder)| (digest.finish(), time_finder, hinc_finder));
+
+        let (digest, time_finder, hinc_finder) = match digest_and_finder {
+            Ok(val) => val,
             Err(err) => {
-                bail!("Error reading metadata for '{}': {err:#}", path.display());
+                bail!("Error computing digest: {err:#}");
             }
         };
 
-        let mtime = meta.modified().map(Into::into).ok();
-        let ctime = meta.ctime_or_creation().ok();
-        let fsize = meta.len();
+        Ok(SourceFileAnalysis {
+            digest,
+            has_time: time_finder.found_time(),
+            has_date: time_finder.found_date(),
+            has_timestamp: time_finder.found_timestamp(),
+            hidden_includes: hinc_finder.into(),
+        })
+    }
+}
 
-        let entry = self.lru.lock().unwrap().get(path).and_then(|entry| {
-            // If the file hasn't changed, reuse the cached entry
-            let file_good =
-                entry.meta.fsize == fsize && entry.meta.ctime == ctime && entry.meta.mtime == mtime;
+#[derive(Debug)]
+pub struct SourceFileHasher;
 
-            // If __TIMESTAMP__ or __DATE__ were found, compare compile time to now (or SOURCE_DATE_EPOCH)
-            let time_good = if entry.found_timestamp {
-                // If __TIMESTAMP__ was found, compare timestamp seconds exactly
-                entry.compiled_at == compile_timestamp
-            } else if entry.found_date {
-                // If __DATE__ was found, only compare the parts of the
-                // timestamp the compiler embeds (day, month, and year)
-                let date_0 = entry.compiled_at.date_naive();
-                let date_1 = compile_timestamp.date_naive();
-                date_0.day() == date_1.day()
-                    && date_0.month() == date_1.month()
-                    && date_0.year() == date_1.year()
-            } else {
-                // If neither were found, use this cached include entry
-                true
-            };
+impl SourceFileAnalyzer for SourceFileHasher {
+    fn analyze(&self, path: &Path, _: chrono::DateTime<chrono::Utc>) -> Result<SourceFileAnalysis> {
+        Ok(SourceFileAnalysis {
+            digest: Digest::from_file_sync(path)?.finish(),
+            ..Default::default()
+        })
+    }
+}
 
-            if file_good && time_good {
-                Some(entry.clone())
-            } else {
-                None
-            }
-        });
+#[derive(Clone, Debug)]
+pub struct SourceFileCache {
+    analyzer: Arc<dyn SourceFileAnalyzer + Send + Sync>,
+    lru: Arc<Mutex<LruCache<PathBuf, Arc<SourceFileEntry>>>>,
+}
 
-        let entry = if let Some(entry) = entry {
-            entry
-        } else {
-            let digest_and_finder = Digest::from_file_with_macro_finders(path, compile_timestamp)
-                .await
-                .with_context(|| format!("while reading '{}'", path.display()))
-                .inspect_err(|err| trace!("[result_matches]: {err:#}"))
-                .map(|(digest, time_finder, hinc_finder)| {
-                    (digest.finish(), time_finder, hinc_finder)
-                });
+impl Default for SourceFileCache {
+    fn default() -> Self {
+        Self::new(50_000, Arc::new(SourceFileHasher))
+    }
+}
 
-            let (digest, time_finder, hinc_finder) = match digest_and_finder {
-                Ok(val) => val,
-                Err(err) => {
-                    bail!("Error computing digest: {err:#}");
-                }
-            };
-
-            let entry = Arc::new(SourceFileEntry {
-                compiled_at: compile_timestamp,
-                meta: SourceFileMeta {
-                    ctime,
-                    digest,
-                    fsize,
-                    mtime,
-                    path: path.into(),
-                },
-                hidden_includes: hinc_finder.into(),
-                found_time: time_finder.found_time(),
-                found_date: time_finder.found_date(),
-                found_timestamp: time_finder.found_timestamp(),
-            });
-
-            self.lru
-                .lock()
-                .unwrap()
-                .insert(path.to_owned(), entry.clone());
-
-            entry
-        };
-
-        Ok(entry)
+impl SourceFileCache {
+    pub fn new(capacity: u64, analyzer: Arc<dyn SourceFileAnalyzer + Send + Sync>) -> Self {
+        SourceFileCache {
+            lru: Arc::new(Mutex::new(LruCache::new(capacity))),
+            analyzer,
+        }
     }
 
-    pub fn get_sync(
+    pub fn get(
         &self,
         path: &Path,
         compile_timestamp: chrono::DateTime<chrono::Utc>,
@@ -285,34 +260,29 @@ impl CSourceFileCache {
         let entry = if let Some(entry) = entry {
             entry
         } else {
-            let digest_and_finder =
-                Digest::from_file_with_macro_finders_sync(path, compile_timestamp)
-                    .with_context(|| format!("while reading '{}'", path.display()))
-                    .inspect_err(|err| trace!("[result_matches]: {err:#}"))
-                    .map(|(digest, time_finder, hinc_finder)| {
-                        (digest.finish(), time_finder, hinc_finder)
-                    });
-
-            let (digest, time_finder, hinc_finder) = match digest_and_finder {
-                Ok(val) => val,
-                Err(err) => {
-                    bail!("Error computing digest: {err:#}");
-                }
-            };
+            let analysis = self
+                .analyzer
+                .analyze(path, compile_timestamp)
+                .inspect_err(|err| {
+                    trace!(
+                        "[SourceFileCache::get('{}', {compile_timestamp})]: {err:#}",
+                        path.display()
+                    );
+                })?;
 
             let entry = Arc::new(SourceFileEntry {
                 compiled_at: compile_timestamp,
                 meta: SourceFileMeta {
                     ctime,
-                    digest,
+                    digest: analysis.digest,
                     fsize,
                     mtime,
                     path: path.into(),
                 },
-                hidden_includes: hinc_finder.into(),
-                found_time: time_finder.found_time(),
-                found_date: time_finder.found_date(),
-                found_timestamp: time_finder.found_timestamp(),
+                found_time: analysis.has_time,
+                found_date: analysis.has_date,
+                found_timestamp: analysis.has_timestamp,
+                hidden_includes: analysis.hidden_includes,
             });
 
             self.lru
@@ -452,9 +422,9 @@ impl SourceFileDeps {
 
     /// Returns the digest of the first result whose expected included files
     /// are already on disk and have not changed.
-    pub async fn find_dependencies(
+    pub fn find_dependencies(
         &mut self,
-        source_file_cache: &CSourceFileCache,
+        source_file_cache: &SourceFileCache,
         compile_timestamp: chrono::DateTime<chrono::Utc>,
         transitive: bool,
         out_pretty: &str,
@@ -469,76 +439,6 @@ impl SourceFileDeps {
         for (idx, (obj_key, deps)) in self.iter_mut().rev().enumerate() {
             let mut hidden_incs = HiddenIncludes::default();
             let (failure, updated) = Self::test_dependencies(
-                source_file_cache,
-                compile_timestamp,
-                &mut deps.sources,
-                &mut hidden_incs,
-                transitive,
-            )
-            .await;
-
-            if let Some(reason) = updated {
-                needs_update = true;
-                if log_enabled!(log::Level::Trace) {
-                    log_messages.push(format!("{obj_key}]: {reason}"));
-                }
-            }
-
-            if let Some(reason) = failure {
-                if log_enabled!(log::Level::Trace) {
-                    log_messages.push(format!("{obj_key}]: Deps lookup failure: {reason}"));
-                }
-            } else {
-                if idx != 0 {
-                    // Need to write back to storage if the LRU order changes
-                    needs_update = true;
-                    if log_enabled!(log::Level::Trace) {
-                        log_messages.push(format!("{obj_key}]: Deps LRU order changed"));
-                    }
-                }
-                maybe_result = Some((obj_key.clone(), deps.clone(), hidden_incs.dedupe()));
-                break;
-            }
-        }
-
-        for msg in log_messages {
-            trace!("[{out_pretty}, {src_key}, {msg}", src_key = self.key);
-        }
-
-        if let Some((obj_key, _, _)) = maybe_result.as_ref() {
-            // Move the entry to the back of the LRU
-            self.revs.get(obj_key);
-        }
-
-        (
-            // Signal this dependencies cache entry was modified and should
-            // be written back to storage.
-            // Note: This can happen regardless whether a result was found.
-            needs_update,
-            // Return the object key and dependencies
-            maybe_result,
-        )
-    }
-
-    /// Returns the digest of the first result whose expected included files
-    /// are already on disk and have not changed.
-    pub fn find_dependencies_sync(
-        &mut self,
-        source_file_cache: &CSourceFileCache,
-        compile_timestamp: chrono::DateTime<chrono::Utc>,
-        transitive: bool,
-        out_pretty: &str,
-    ) -> (bool, Option<(String, Dependencies, HiddenIncludes)>) {
-        let mut maybe_result = None;
-        let mut needs_update = false;
-        let mut log_messages = vec![];
-
-        // Find the first result key whose include files on disk match this
-        // dependencies cache entry. Check newest results first since they're
-        // more likely to match.
-        for (idx, (obj_key, deps)) in self.iter_mut().rev().enumerate() {
-            let mut hidden_incs = HiddenIncludes::default();
-            let (failure, updated) = Self::test_dependencies_sync(
                 source_file_cache,
                 compile_timestamp,
                 &mut deps.sources,
@@ -590,85 +490,8 @@ impl SourceFileDeps {
     }
 
     /// A result matches if all of its include files exist on disk and have not changed.
-    async fn test_dependencies(
-        source_file_cache: &CSourceFileCache,
-        compile_timestamp: chrono::DateTime<chrono::Utc>,
-        dependencies: &mut [SourceFileMeta],
-        hidden_incs: &mut HiddenIncludes,
-        transitive: bool,
-    ) -> (Option<String>, Option<String>) {
-        let mut failure = None;
-        let mut updated = None;
-
-        for prev in dependencies.iter_mut() {
-            let path = Path::new(&prev.path);
-
-            if transitive {
-                let err = match crate::util::async_fs::try_exists(path).await {
-                    Ok(true) => continue,
-                    Ok(false) => std::io::Error::new(
-                        std::io::ErrorKind::NotFound,
-                        anyhow!("{} does not exist", path.display()),
-                    ),
-                    Err(err) => err,
-                };
-                failure = Some(format!("{err:#}"));
-                break;
-            }
-
-            let curr = match source_file_cache.get(path, compile_timestamp).await {
-                Ok(entry) => entry,
-                Err(err) => {
-                    failure = Some(format!("{err:#}"));
-                    break;
-                }
-            };
-
-            let SourceFileEntry {
-                meta: curr,
-                found_time,
-                found_date,
-                found_timestamp,
-                hidden_includes,
-                ..
-            } = curr.as_ref();
-
-            hidden_incs.extend([hidden_includes]);
-
-            if *found_time {
-                // We don't know for sure that the program actually uses the __TIME__ macro,
-                // but we have to assume it anyway and hash the time stamp. However, that's
-                // not very useful since the chance that we get a cache hit later the same
-                // second should be quite slim... So, just signal back to the caller that
-                // __TIME__ has been found so that the dependencies cache can be disabled.
-                failure = Some(format!("Found __TIME__ in {path:?}"));
-                break;
-            }
-
-            // If the digests are different, disable dependencies cache
-            if prev.digest != curr.digest {
-                failure = Some(format!("Digest mismatch for {path:?}"));
-                break;
-            }
-
-            // If __DATE__ or __TIMESTAMP__ found, update the includes for this result.
-            if *found_date {
-                // trace!("[{out_pretty}, {src_key}]: updating entry, __DATE__ found in {path:?}");
-                updated = Some(format!("updating entry, __DATE__ found in {path:?}"));
-                *prev = curr.clone();
-            } else if *found_timestamp {
-                // trace!("[{out_pretty}, {src_key}]: updating entry, __TIMESTAMP__ found in {path:?}");
-                updated = Some(format!("updating entry, __TIMESTAMP__ found in {path:?}"));
-                *prev = curr.clone();
-            }
-        }
-
-        (failure, updated)
-    }
-
-    /// A result matches if all of its include files exist on disk and have not changed.
-    fn test_dependencies_sync(
-        source_file_cache: &CSourceFileCache,
+    fn test_dependencies(
+        source_file_cache: &SourceFileCache,
         compile_timestamp: chrono::DateTime<chrono::Utc>,
         dependencies: &mut [SourceFileMeta],
         hidden_incs: &mut HiddenIncludes,
@@ -693,7 +516,7 @@ impl SourceFileDeps {
                 break;
             }
 
-            let curr = match source_file_cache.get_sync(path, compile_timestamp) {
+            let curr = match source_file_cache.get(path, compile_timestamp) {
                 Ok(entry) => entry,
                 Err(err) => {
                     failure = Some(format!("{err:#}"));
@@ -862,42 +685,6 @@ impl Serialize for SourceFileDeps {
         map.serialize_entry("size", &self.revs.capacity())?;
         map.serialize_entry("revs", &self.iter().rev().collect::<Vec<_>>())?;
         map.end()
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct SourceDigestCache {
-    lru: Arc<Mutex<LruCache<PathBuf, String>>>,
-}
-
-impl Default for SourceDigestCache {
-    fn default() -> Self {
-        Self::new(50_000)
-    }
-}
-
-impl SourceDigestCache {
-    pub fn new(capacity: u64) -> Self {
-        Self {
-            lru: Arc::new(Mutex::new(LruCache::new(capacity))),
-        }
-    }
-
-    pub fn get_sync<P: AsRef<Path>>(&self, path: P) -> Result<String> {
-        // Assumes path has been canonicalized
-        let path = path.as_ref();
-
-        let mut lru = self.lru.lock().unwrap();
-
-        let hash = if let Some(hash) = lru.get(path) {
-            hash.clone()
-        } else {
-            let hash = Digest::from_file_sync(path)?.finish();
-            lru.insert(path.to_owned(), hash.clone());
-            hash
-        };
-
-        Ok(hash)
     }
 }
 
@@ -1165,7 +952,7 @@ int __fxstat64(int ver, int fd, struct stat64 *st)
 }
 "#;
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct HiddenIncludes {
     /// The operands of `__has_include`.
     pub includes: Vec<String>,
@@ -1173,6 +960,16 @@ pub struct HiddenIncludes {
     pub next_includes: Vec<String>,
     /// The operands of `__has_embed`, including any embed parameters.
     pub embeds: Vec<String>,
+}
+
+impl Default for HiddenIncludes {
+    fn default() -> Self {
+        Self {
+            includes: Vec::with_capacity(0),
+            next_includes: Vec::with_capacity(0),
+            embeds: Vec::with_capacity(0),
+        }
+    }
 }
 
 impl HiddenIncludes {

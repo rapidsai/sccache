@@ -630,7 +630,6 @@ pub struct GenerateHashKeyArgs<'a, T: CommandCreatorSync> {
     pub env_vars: &'a [(OsString, OsString)],
     pub runtime: &'a tokio::runtime::Handle,
     pub service: &'a server::SccacheService<T>,
-    pub use_async_io: bool,
     pub dist_compile: bool,
 }
 
@@ -710,11 +709,6 @@ impl<T: CommandCreatorSync> dyn CompilerHasher<T> {
             })
         });
 
-        let use_async_io = env_vars.iter().any(|(k, v)| {
-            k == "SCCACHE_ASYNC_IO_PIPELINE"
-                && matches!(v.to_str().unwrap_or_default(), "true" | "on" | "1")
-        });
-
         let hash_time = Instant::now();
 
         let hash_result = self
@@ -725,7 +719,6 @@ impl<T: CommandCreatorSync> dyn CompilerHasher<T> {
                 env_vars: &env_vars,
                 runtime: &runtime,
                 service,
-                use_async_io,
                 dist_compile: dist_client.is_some(),
             })
             .await;
@@ -3690,7 +3683,6 @@ LLVM version: 6.0",
                         env_vars: &[],
                         runtime: pool,
                         service: &service,
-                        use_async_io: false,
                         dist_compile: false,
                     })
                     .wait()
@@ -3752,7 +3744,6 @@ LLVM version: 6.0",
                     env_vars: &[],
                     runtime: pool,
                     service: &service,
-                    use_async_io: true,
                     dist_compile: false,
                 })
                 .wait()
@@ -3851,7 +3842,6 @@ LLVM version: 6.0",
                         env_vars: &[],
                         runtime: pool,
                         service: &service,
-                        use_async_io: false,
                         dist_compile: false,
                     })
                     .wait()
@@ -3918,7 +3908,6 @@ LLVM version: 6.0",
                         env_vars: &[],
                         runtime: pool,
                         service: &service,
-                        use_async_io: true,
                         dist_compile: false,
                     })
                     .wait()

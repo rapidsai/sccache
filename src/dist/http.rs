@@ -332,11 +332,8 @@ mod scheduler {
                                 let mut quality = 1.0;
                                 if s.contains(";") {
                                     let mut parts = s.split(";");
-                                    if let Some(m) = parts.next() {
-                                        mimetype = m.to_owned();
-                                    } else {
-                                        return None;
-                                    }
+                                    let m = parts.next()?;
+                                    mimetype = m.to_owned();
                                     if let Some(q) = parts.next()
                                         && let Some(q) = q.split("=").last()
                                         && let Ok(q) = q.parse()
@@ -1158,7 +1155,7 @@ mod client {
         common::{ReqwestRequestBuilderExt, bincode_req_fut},
         urls,
     };
-    use crate::compiler::SourceDigestCache;
+    use crate::compiler::SourceFileCache;
     use crate::{
         config,
         dist::{
@@ -1349,7 +1346,7 @@ mod client {
         put_job_input: AsyncMulticast<PutInputArgs, ()>,
         tc_cache: Arc<cache::ClientToolchains>,
         /// Cache of source file hashes
-        source_digest_cache: SourceDigestCache,
+        source_digest_cache: SourceFileCache,
     }
 
     impl Client {
@@ -1394,12 +1391,12 @@ mod client {
                 put_toolchain,
                 put_job_input,
                 tc_cache: client_toolchains,
-                source_digest_cache: SourceDigestCache::new(50_000),
+                source_digest_cache: SourceFileCache::default(),
             })
         }
 
         pub async fn get_job_inputs(
-            cache: SourceDigestCache,
+            cache: SourceFileCache,
             contents: dist::ArchiveContents,
             inputs: BTreeMap<String, JobInput>,
         ) -> Result<(dist::JobInputs, BTreeMap<String, JobInput>)> {
@@ -1407,12 +1404,14 @@ mod client {
             use itertools::Itertools;
             let ArchiveContents { dirs, files, links } = contents;
 
+            let c = Default::default();
+
             crate::util::spawn_blocking(move || {
                 let (mut digest, files, inputs) = files
                     .into_iter()
                     .map(|(dist_path, file_path)| {
-                        let file_hash = cache.get_sync(&file_path)?;
                         let dist_path = path_to_str(dist_path)?.into_owned();
+                        let file_hash = cache.get(&file_path, c)?.meta.digest.clone();
                         Ok::<_, anyhow::Error>((dist_path, (file_hash, file_path)))
                     })
                     .try_fold(

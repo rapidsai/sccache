@@ -31,8 +31,8 @@ use crate::{
         tasking_vx::TaskingVX,
         tileiras::Tileiras,
         util::{
-            CSourceFileCache, DEPS_VERSION, Dependencies, HiddenIncludes, SourceFileDeps,
-            SourceFileEntry,
+            CSourceFileAnalyzer, DEPS_VERSION, Dependencies, HiddenIncludes, SourceFileCache,
+            SourceFileDeps, SourceFileEntry,
         },
     },
     dist,
@@ -766,7 +766,6 @@ where
     parsed_args: ParsedArguments,
     runtime: tokio::runtime::Handle,
     service: crate::server::SccacheService<T>,
-    use_async_io: bool,
 }
 
 struct ResolvedDependencies {
@@ -800,7 +799,6 @@ where
             cache_control,
             service,
             runtime,
-            use_async_io,
             ..
         } = args;
 
@@ -840,7 +838,6 @@ where
                     parsed_args: self.parsed_args.clone(),
                     runtime: runtime.clone(),
                     service: service.clone(),
-                    use_async_io,
                 };
 
                 let (deps, hidden_includes) = get_dependencies(&deps_args).await?;
@@ -872,7 +869,6 @@ where
             let start = Instant::now();
 
             let obj_key = HashKeyParams::new(&self.parsed_args)
-                .with_async_io(use_async_io)
                 .with_runtime(runtime)
                 // Hash arch, common, and preprocessor args
                 .with_args(&self.parsed_args.arch_args[..])
@@ -1014,7 +1010,6 @@ where
     let GetDependenciesArgs {
         compile_timestamp,
         cache_control,
-        use_async_io,
         dist_compile,
         ..
     } = *args;
@@ -1030,7 +1025,6 @@ where
 
         let deps_key = HashKeyParams::new(parsed_args)
             .with_runtime(runtime)
-            .with_async_io(use_async_io)
             // Hash arch, common, dependency, and preprocessor args
             .with_args(&parsed_args.arch_args[..])
             .with_args(&parsed_args.common_args[..])
@@ -1177,33 +1171,19 @@ where
 
         let start = Instant::now();
 
-        let (depsfile, needs_update, obj_key_and_deps) = if use_async_io {
-            let (needs_update, obj_key_and_deps) = depsfile
-                .find_dependencies(
+        let (depsfile, needs_update, obj_key_and_deps) = crate::util::spawn_blocking_on(runtime, {
+            let out_pretty = out_pretty.clone().into_owned();
+            move || {
+                let (needs_update, obj_key_and_deps) = depsfile.find_dependencies(
                     &SOURCE_FILE_CACHE,
                     compile_timestamp,
                     dist_compile,
                     &out_pretty,
-                )
-                .await;
-            (depsfile, needs_update, obj_key_and_deps)
-        } else {
-            let (depsfile, needs_update, obj_key_and_deps) =
-                crate::util::spawn_blocking_on(runtime, {
-                    let out_pretty = out_pretty.clone().into_owned();
-                    move || {
-                        let (needs_update, obj_key_and_deps) = depsfile.find_dependencies_sync(
-                            &SOURCE_FILE_CACHE,
-                            compile_timestamp,
-                            dist_compile,
-                            &out_pretty,
-                        );
-                        (depsfile, needs_update, obj_key_and_deps)
-                    }
-                })
-                .await?;
-            (depsfile, needs_update, obj_key_and_deps)
-        };
+                );
+                (depsfile, needs_update, obj_key_and_deps)
+            }
+        })
+        .await?;
 
         trace!(
             "[{out_pretty}]: find deps time: {}",
@@ -1226,7 +1206,7 @@ where
         SourceFileDeps::new(
             deps_key.unwrap_or_default(),
             SOURCE_FILE_CACHE
-                .get_sync(&parsed_args.input_absolute, compile_timestamp)?
+                .get(&parsed_args.input_absolute, compile_timestamp)?
                 .meta
                 .clone(),
         )
@@ -1376,36 +1356,19 @@ where
             let found_all = deps.len() == deps_len;
             let dependencies = deps.iter().cloned().collect::<Vec<_>>();
 
-            sources = if use_async_io {
-                crate::util::try_join_all(dependencies.into_iter().map(|path| async move {
-                    if path.exists() {
-                        SOURCE_FILE_CACHE
-                            .get(&path, compile_timestamp)
-                            .await
-                            .map(Some)
-                    } else {
-                        Ok(None)
-                    }
-                }))
-                .await?
-                .into_iter()
-                .flatten()
-                .collect::<Vec<Arc<SourceFileEntry>>>()
-            } else {
-                crate::util::spawn_blocking_on(runtime, move || {
-                    dependencies
-                        .into_iter()
-                        .filter_map(|path| {
-                            if path.exists() {
-                                Some(SOURCE_FILE_CACHE.get_sync(&path, compile_timestamp))
-                            } else {
-                                None
-                            }
-                        })
-                        .try_collect()
-                })
-                .await??
-            };
+            sources = crate::util::spawn_blocking_on(runtime, move || {
+                dependencies
+                    .into_iter()
+                    .filter_map(|path| {
+                        if path.exists() {
+                            Some(SOURCE_FILE_CACHE.get(&path, compile_timestamp))
+                        } else {
+                            None
+                        }
+                    })
+                    .try_collect::<_, Vec<Arc<SourceFileEntry>>, _>()
+            })
+            .await??;
 
             // Break early if we don't need to find the additional hidden dependencies
             // for distributed compilation, or if we tried and didn't find any new ones.
@@ -2421,10 +2384,11 @@ static CACHED_ENV_VARS: LazyLock<HashSet<&'static OsStr>> = LazyLock::new(|| {
 });
 
 // cache for hashed source files
-static SOURCE_FILE_CACHE: LazyLock<CSourceFileCache> = LazyLock::new(|| {
-    CSourceFileCache::new(
+static SOURCE_FILE_CACHE: LazyLock<SourceFileCache> = LazyLock::new(|| {
+    SourceFileCache::new(
         // TODO: capacity chosen arbitrarily, should measure instead
         50_000,
+        Arc::new(CSourceFileAnalyzer),
     )
 });
 
@@ -2446,7 +2410,6 @@ static SOURCE_FILE_CACHE: LazyLock<CSourceFileCache> = LazyLock::new(|| {
 // #[derive(Debug, Clone)]
 pub struct HashKeyParams<'a> {
     args: Vec<&'a OsString>,
-    async_io: bool,
     compile_timestamp: DateTime<Utc>,
     cwd: &'a Path,
     env_vars: &'a [(OsString, OsString)],
@@ -2470,7 +2433,6 @@ impl<'a> HashKeyParams<'a> {
     pub fn new(parsed_args: &'a ParsedArguments) -> Self {
         Self {
             args: vec![],
-            async_io: true,
             compile_timestamp: Utc::now(),
             cwd: Path::new(""),
             env_vars: &[],
@@ -2487,11 +2449,6 @@ impl<'a> HashKeyParams<'a> {
     /// Sets the environment variables to consider for caching.
     pub fn with_args(mut self, args: &'a [OsString]) -> Self {
         self.args.extend(args);
-        self
-    }
-
-    pub fn with_async_io(mut self, async_io: bool) -> Self {
-        self.async_io = async_io;
         self
     }
 
@@ -2615,51 +2572,30 @@ impl<'a> HashKeyParams<'a> {
             &tokio::runtime::Handle::current()
         };
 
-        let entries = if self.async_io {
-            // Hash the input and dependencies
-            crate::util::try_join_all(self.input_files.into_iter().map(|path| async move {
-                let path = self.cwd.join(path);
-                let entry = SOURCE_FILE_CACHE.get(&path, self.compile_timestamp).await?;
+        // Canonicalize and hash the dependencies on a background thread
+        let entries = crate::util::spawn_blocking_on(runtime, {
+            let cwd = self.cwd.to_owned();
+            let out_pretty = self.parsed_args.output_pretty().into_owned();
+            move || {
+                let mut entries = vec![];
 
-                if entry.found_time {
-                    // __TIME__ found, disable caching
-                    debug!(
-                        "[{}]: Found __TIME__ in '{}'",
-                        self.parsed_args.output_pretty(),
-                        path.display()
-                    );
-                    Ok::<_, anyhow::Error>(None)
-                } else {
-                    Ok(Some(entry.clone()))
-                }
-            }))
-            .await?
-        } else {
-            // Canonicalize and hash the dependencies on a background thread
-            crate::util::spawn_blocking_on(runtime, {
-                let cwd = self.cwd.to_owned();
-                let out_pretty = self.parsed_args.output_pretty().into_owned();
-                move || {
-                    let mut entries = vec![];
+                for path in self.input_files {
+                    let path = cwd.join(path.as_path());
+                    let entry = SOURCE_FILE_CACHE.get(&path, self.compile_timestamp)?;
 
-                    for path in self.input_files {
-                        let path = cwd.join(path.as_path());
-                        let entry = SOURCE_FILE_CACHE.get_sync(&path, self.compile_timestamp)?;
-
-                        if entry.found_time {
-                            // __TIME__ found, disable caching
-                            debug!("[{out_pretty}]: Found __TIME__ in '{}'", path.display());
-                            entries.push(None);
-                        } else {
-                            entries.push(Some(entry.clone()));
-                        }
+                    if entry.found_time {
+                        // __TIME__ found, disable caching
+                        debug!("[{out_pretty}]: Found __TIME__ in '{}'", path.display());
+                        entries.push(None);
+                    } else {
+                        entries.push(Some(entry.clone()));
                     }
-
-                    Ok::<_, anyhow::Error>(entries)
                 }
-            })
-            .await??
-        };
+
+                Ok::<_, anyhow::Error>(entries)
+            }
+        })
+        .await??;
 
         if entries.iter().any(|entry| entry.is_none()) {
             Ok(None)
