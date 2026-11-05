@@ -774,6 +774,7 @@ mod test {
     }
 
     #[tokio::test]
+    #[cfg(not(target_os = "macos"))]
     async fn bind_skips_address_bound_by_another_socket() {
         // Bound without SO_REUSEADDR and not listening: connecting is refused, but binding
         // fails with AddrInUse.
