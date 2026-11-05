@@ -203,6 +203,12 @@ tracing-subscriber = { version = "0.3", features = [
 ], optional = true }
 version-compare = { version = "0.1.1", optional = true }
 
+# dist-tests only (tests/oauth.rs). As a dev-dependency it would be built by
+# every test build and turn on serde_json/preserve_order for all of them.
+thirtyfour = { version = "0.36", optional = true, default-features = false, features = [
+  "reqwest",
+] }
+
 # bench only (benches/sccache_bench.rs). As a dev-dependency it would be built
 # by every test build.
 divan = { package = "codspeed-divan-compat", version = "4", optional = true }
@@ -217,7 +223,6 @@ predicates = "=3.1.0"
 serial_test = "3.1"
 temp-env = "0.3.6"
 test-case = "3.3.1"
-thirtyfour = "0.36"
 version-compare = { version = "0.1.1" }
 
 [target.'cfg(unix)'.dependencies]
@@ -343,7 +348,7 @@ dist-server = [
   "rustls-native-certs",
 ]
 # Enables dist tests with external requirements
-dist-tests = ["dist-client", "dist-server"]
+dist-tests = ["dist-client", "dist-server", "dep:thirtyfour"]
 # Enables benches/sccache_bench.rs
 bench = ["dep:divan"]
 
