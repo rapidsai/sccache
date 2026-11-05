@@ -953,16 +953,30 @@ impl From<config::cache::S3> for StorageBuilder {
                     .map_err(|err| anyhow!("create s3 cache failed: {err:?}"))
             })
             .watch_paths({
-                let ctx = reqsign::default_context();
+                let home = std::env::home_dir();
                 [
-                    ctx.env_var("AWS_CONFIG_FILE").unwrap_or_else(|| "~/.aws/config".into()),
-                    ctx.env_var("AWS_SHARED_CREDENTIALS_FILE").unwrap_or_else(|| "~/.aws/credentials".into()),
+                    ("AWS_CONFIG_FILE", "~/.aws/config"),
+                    ("AWS_SHARED_CREDENTIALS_FILE", "~/.aws/credentials"),
                 ]
-                .iter()
-                .filter_map(|s| ctx.expand_home_dir(s))
+                .into_iter()
+                .filter_map(|(var, default)| {
+                    let path = std::env::var(var).unwrap_or_else(|_| default.to_owned());
+                    expand_home_dir(&path, home.as_deref())
+                })
                 .map(PathBuf::from)
                 .collect::<Vec<_>>()
             })
+    }
+}
+
+/// Same `~` expansion as reqsign's `Context::expand_home_dir`, which is what
+/// OpenDAL uses to find these files, so we watch the paths it actually reads.
+#[cfg(feature = "s3")]
+fn expand_home_dir(path: &str, home: Option<&std::path::Path>) -> Option<String> {
+    if !path.starts_with("~/") && !path.starts_with("~\\") {
+        Some(path.to_owned())
+    } else {
+        home.map(|home| path.replace('~', &home.to_string_lossy()))
     }
 }
 
@@ -1329,6 +1343,29 @@ mod test {
                 );
             });
         }
+    }
+
+    #[test]
+    #[cfg(feature = "s3")]
+    fn test_expand_home_dir() {
+        let home = Some(std::path::Path::new("/home/user"));
+        let expand = |path| expand_home_dir(path, home);
+        assert_eq!(expand("~/.aws/config").unwrap(), "/home/user/.aws/config");
+        assert_eq!(
+            expand("~\\.aws\\config").unwrap(),
+            "/home/user\\.aws\\config"
+        );
+        assert_eq!(expand("/etc/aws/config").unwrap(), "/etc/aws/config");
+        assert_eq!(expand("~other/.aws/config").unwrap(), "~other/.aws/config");
+        assert_eq!(expand("a/~/b").unwrap(), "a/~/b");
+        // Like reqsign, every `~` is replaced, not only the leading one.
+        assert_eq!(expand("~/a~b").unwrap(), "/home/user/a/home/userb");
+
+        assert_eq!(expand_home_dir("~/.aws/config", None), None);
+        assert_eq!(
+            expand_home_dir("/etc/aws/config", None).unwrap(),
+            "/etc/aws/config"
+        );
     }
 
     #[test]
