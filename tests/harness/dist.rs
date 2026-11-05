@@ -42,7 +42,11 @@ use sccache::{
 
 use uuid::Uuid;
 
-use super::{TC_CACHE_SIZE, check_output, client::SccacheClient, prune_command, write_json_cfg};
+use super::{
+    TC_CACHE_SIZE, TestDir, check_output,
+    client::{SccacheClient, sccache_client_cfg},
+    write_json_cfg,
+};
 
 const CONTAINER_NAME_PREFIX: &str = "sccache_dist";
 const CONTAINER_EXTERNAL_PATH: &str = "/sccache/external";
@@ -55,10 +59,6 @@ const MAX_STARTUP_WAIT: Duration = Duration::from_secs(30);
 static SCHEDULER_PORT: AtomicU16 = AtomicU16::new(10500);
 static RABBITMQ_PORT: AtomicU16 = AtomicU16::new(5672);
 static REDIS_PORT: AtomicU16 = AtomicU16::new(6379);
-
-pub fn cargo_command() -> Command {
-    prune_command(Command::new("cargo"))
-}
 
 pub fn sccache_dist_path() -> PathBuf {
     env!("CARGO_BIN_EXE_sccache-dist").into()
@@ -854,8 +854,8 @@ pub struct DistSystem {
     handles: Vec<DistHandle>,
     root_dir: PathBuf,
     data_dir: PathBuf,
-    dist_dir: (PathBuf, Option<tempfile::TempDir>),
-    test_dir: (PathBuf, Option<tempfile::TempDir>),
+    dist_dir: TestDir,
+    test_dir: TestDir,
     sccache_dist: PathBuf,
 }
 
@@ -869,37 +869,16 @@ impl DistSystem {
         let data_dir = root_dir.join("data");
         fs::create_dir_all(&data_dir).unwrap();
 
-        let dist_dir = tempfile::Builder::new()
-            .prefix("dist_")
-            .tempdir_in(&root_dir)
-            .unwrap();
-
-        // Persist the dist dir if SCCACHE_DEBUG is defined
-        let (dist_dir_path, dist_dir) = if env::var("SCCACHE_DEBUG").is_ok() {
-            (dist_dir.keep(), None)
-        } else {
-            (dist_dir.path().to_path_buf(), Some(dist_dir))
-        };
-
-        let test_dir = tempfile::Builder::new()
-            .prefix("test_")
-            .tempdir_in(&root_dir)
-            .unwrap();
-
-        // Persist the test dir if SCCACHE_DEBUG is defined
-        let (test_dir_path, test_dir) = if env::var("SCCACHE_DEBUG").is_ok() {
-            (test_dir.keep(), None)
-        } else {
-            (test_dir.path().to_path_buf(), Some(test_dir))
-        };
+        let dist_dir = TestDir::new_in("dist_", &root_dir);
+        let test_dir = TestDir::new_in("test_", &root_dir);
 
         Self {
             name: name.to_owned(),
             handles: vec![],
             root_dir,
             data_dir,
-            dist_dir: (dist_dir_path, dist_dir),
-            test_dir: (test_dir_path, test_dir),
+            dist_dir,
+            test_dir,
             sccache_dist: sccache_dist_path(),
         }
     }
@@ -909,11 +888,19 @@ impl DistSystem {
     }
 
     pub fn dist_dir(&self) -> &Path {
-        self.dist_dir.0.as_path()
+        self.dist_dir.path()
     }
 
     pub fn test_dir(&self) -> &Path {
-        self.test_dir.0.as_path()
+        self.test_dir.path()
+    }
+
+    /// A client config that sends compilations to the first scheduler, with a
+    /// local disk cache of `cache_size` bytes.
+    pub fn client_cfg(&self, cache_size: u64) -> Result<ClientConfig> {
+        let mut cfg = sccache_client_cfg(self.data_dir(), cache_size);
+        cfg.dist.url = Some(self.scheduler(0)?.url());
+        Ok(cfg)
     }
 
     pub fn new_client(&self, client_config: &ClientConfig) -> Arc<SccacheClient> {

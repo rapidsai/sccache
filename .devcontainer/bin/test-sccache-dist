@@ -14,9 +14,9 @@ fi
 sudo rm -rf /tmp/sccache_*.txt /tmp/sccache /tmp/sccache_system_test* /tmp/sccache_dist/*/{dist,test}*
 
 if test $# -eq 0; then
-    set -- test_dist_
+    set -- dist::
 elif test "$1" = --; then
-    set -- test_dist_ "$@"
+    set -- dist:: "$@"
 fi
 
 if ! test -n "${RUST_BACKTRACE:+x}"; then

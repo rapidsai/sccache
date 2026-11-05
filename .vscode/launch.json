@@ -171,7 +171,7 @@
         {
             "type": "lldb",
             "request": "launch",
-            "name": "Debug integration test 'cache_hit_rate'",
+            "name": "Debug integration tests",
             "cargo": {
                 "args": [
                     "test",
@@ -180,188 +180,14 @@
                     "-F",
                     "all,dist-server,vendored-openssl",
                     "--no-run",
-                    "--test=cache_hit_rate",
+                    "--test=integration",
                     "--package=sccache",
                 ],
                 "env": {
                     "CARGO_TARGET_DIR": "${workspaceFolder}/.vscode/.debugger"
                 },
                 "filter": {
-                    "name": "cache_hit_rate",
-                    "kind": "test"
-                }
-            },
-            "args": [],
-            "cwd": "${workspaceFolder}",
-            "terminal": "console",
-            "internalConsoleOptions": "neverOpen",
-            "sourceLanguages": ["rust"],
-        },
-        {
-            "type": "lldb",
-            "request": "launch",
-            "name": "Debug integration test 'dist'",
-            "cargo": {
-                "args": [
-                    "test",
-                    "--locked",
-                    "--profile", "dev",
-                    "-F",
-                    "all,dist-server,vendored-openssl",
-                    "--no-run",
-                    "--test=dist",
-                    "--package=sccache",
-                ],
-                "env": {
-                    "CARGO_TARGET_DIR": "${workspaceFolder}/.vscode/.debugger"
-                },
-                "filter": {
-                    "name": "dist",
-                    "kind": "test"
-                }
-            },
-            "args": [],
-            "cwd": "${workspaceFolder}",
-            "terminal": "console",
-            "internalConsoleOptions": "neverOpen",
-            "sourceLanguages": ["rust"],
-        },
-        {
-            "type": "lldb",
-            "request": "launch",
-            "name": "Debug integration test 'oauth'",
-            "cargo": {
-                "args": [
-                    "test",
-                    "--locked",
-                    "--profile", "dev",
-                    "-F",
-                    "all,dist-server,vendored-openssl",
-                    "--no-run",
-                    "--test=oauth",
-                    "--package=sccache",
-                ],
-                "env": {
-                    "CARGO_TARGET_DIR": "${workspaceFolder}/.vscode/.debugger"
-                },
-                "filter": {
-                    "name": "oauth",
-                    "kind": "test"
-                }
-            },
-            "args": [],
-            "cwd": "${workspaceFolder}",
-            "terminal": "console",
-            "internalConsoleOptions": "neverOpen",
-            "sourceLanguages": ["rust"],
-        },
-        {
-            "type": "lldb",
-            "request": "launch",
-            "name": "Debug integration test 'sccache_args'",
-            "cargo": {
-                "args": [
-                    "test",
-                    "--locked",
-                    "--profile", "dev",
-                    "-F",
-                    "all,dist-server,vendored-openssl",
-                    "--no-run",
-                    "--test=sccache_args",
-                    "--package=sccache",
-                ],
-                "env": {
-                    "CARGO_TARGET_DIR": "${workspaceFolder}/.vscode/.debugger"
-                },
-                "filter": {
-                    "name": "sccache_args",
-                    "kind": "test"
-                }
-            },
-            "args": [],
-            "cwd": "${workspaceFolder}",
-            "terminal": "console",
-            "internalConsoleOptions": "neverOpen",
-            "sourceLanguages": ["rust"],
-        },
-        {
-            "type": "lldb",
-            "request": "launch",
-            "name": "Debug integration test 'sccache_cargo'",
-            "cargo": {
-                "args": [
-                    "test",
-                    "--locked",
-                    "--profile", "dev",
-                    "-F",
-                    "all,dist-server,vendored-openssl",
-                    "--no-run",
-                    "--test=sccache_cargo",
-                    "--package=sccache",
-                ],
-                "env": {
-                    "CARGO_TARGET_DIR": "${workspaceFolder}/.vscode/.debugger"
-                },
-                "filter": {
-                    "name": "sccache_cargo",
-                    "kind": "test"
-                }
-            },
-            "args": [],
-            "cwd": "${workspaceFolder}",
-            "terminal": "console",
-            "internalConsoleOptions": "neverOpen",
-            "sourceLanguages": ["rust"],
-        },
-        {
-            "type": "lldb",
-            "request": "launch",
-            "name": "Debug integration test 'sccache_rustc'",
-            "cargo": {
-                "args": [
-                    "test",
-                    "--locked",
-                    "--profile", "dev",
-                    "-F",
-                    "all,dist-server,vendored-openssl",
-                    "--no-run",
-                    "--test=sccache_rustc",
-                    "--package=sccache",
-                ],
-                "env": {
-                    "CARGO_TARGET_DIR": "${workspaceFolder}/.vscode/.debugger"
-                },
-                "filter": {
-                    "name": "sccache_rustc",
-                    "kind": "test"
-                }
-            },
-            "args": [],
-            "cwd": "${workspaceFolder}",
-            "terminal": "console",
-            "internalConsoleOptions": "neverOpen",
-            "sourceLanguages": ["rust"],
-        },
-        {
-            "type": "lldb",
-            "request": "launch",
-            "name": "Debug integration test 'system'",
-            "cargo": {
-                "args": [
-                    "test",
-                    "--locked",
-                    "--profile", "dev",
-                    "-F",
-                    "all,dist-server,vendored-openssl",
-                    "--no-run",
-                    "--test=system",
-                    "--package=sccache",
-                ],
-                "env": {
-                    "CARGO_TARGET_DIR": "${workspaceFolder}/.vscode/.debugger"
-                },
-                "filter": {
-                    "name": "system",
+                    "name": "integration",
                     "kind": "test"
                 }
             },

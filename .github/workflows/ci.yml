@@ -83,27 +83,56 @@ jobs:
             # Oldest supported version, keep in sync with README.md
             rustc: "1.91.0"
             extra_desc: C++ dist-tests
-            extra_args: --no-default-features --features=dist-tests test_dist_cpp_
+            test_targets: --test integration
+            extra_args: --no-default-features --features=dist-tests dist::test_dist_cpp_
+          - os: ubuntu-22.04
+            # Oldest supported version, keep in sync with README.md
+            rustc: "1.91.0"
+            extra_desc: C++ dist-tests (changes)
+            test_targets: --test integration
+            extra_args: --no-default-features --features=dist-tests dist::test_dist_deps_dependency_changes_
+          - os: ubuntu-22.04
+            # Oldest supported version, keep in sync with README.md
+            rustc: "1.91.0"
+            extra_desc: C++ dist-tests (__DATE__)
+            test_targets: --test integration
+            extra_args: --no-default-features --features=dist-tests dist::test_dist_deps_macros_date_
+          - os: ubuntu-22.04
+            # Oldest supported version, keep in sync with README.md
+            rustc: "1.91.0"
+            extra_desc: C++ dist-tests (__TIME__)
+            test_targets: --test integration
+            extra_args: --no-default-features --features=dist-tests dist::test_dist_deps_macros_time_
+          - os: ubuntu-22.04
+            # Oldest supported version, keep in sync with README.md
+            rustc: "1.91.0"
+            extra_desc: C++ dist-tests (__TIMESTAMP__)
+            test_targets: --test integration
+            extra_args: --no-default-features --features=dist-tests dist::test_dist_deps_macros_timestamp_
           - os: ubuntu-22.04
             # Oldest supported version, keep in sync with README.md
             rustc: "1.91.0"
             cuda: "13.3"
             extra_desc: cuda13.3 dist-tests
-            extra_args: --no-default-features --features=dist-tests test_dist_cuda_
+            test_targets: --test integration
+            extra_args: --no-default-features --features=dist-tests dist::test_dist_cuda_
           - os: ubuntu-22.04
             # Oldest supported version, keep in sync with README.md
             rustc: "1.91.0"
             extra_desc: cargo dist-tests
-            extra_args: --jobs 1 --no-default-features --features=dist-tests test_dist_cargo_
+            test_targets: --test integration
+            extra_args: --no-default-features --features=dist-tests dist::test_dist_cargo_ -- --test-threads=1
           - os: ubuntu-22.04
             rustc: stable
             extra_desc: cargo dist-tests
-            extra_args: --jobs 1 --no-default-features --features=dist-tests test_dist_cargo_
+            test_targets: --test integration
+            extra_args: --no-default-features --features=dist-tests dist::test_dist_cargo_ -- --test-threads=1
           - os: ubuntu-22.04
             rustc: nightly
             allow_failure: true
             extra_desc: cargo dist-tests
-            extra_args: --jobs 1 --no-default-features --features=dist-tests,unstable test_dist_cargo_
+            test_targets: --test integration
+            extra_args: --no-default-features --features=dist-tests,unstable dist::test_dist_cargo_ -- --test-threads=1
           - os: ubuntu-22.04
             rustc: stable
             extra_desc: dist-server
@@ -265,7 +294,7 @@ jobs:
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /usr/local/share/boost /usr/share/swift /var/lib/apt/lists/*
 
       - name: Execute tests
-        run: cargo test --locked --lib --bins --tests ${{ matrix.extra_args }}
+        run: cargo test --locked ${{ matrix.test_targets || '--lib --bins --tests' }} ${{ matrix.extra_args }}
         env:
           CARGO_INCREMENTAL: "0"
           RUSTC_WRAPPER: ""

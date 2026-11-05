@@ -1,6 +1,6 @@
-#![deny(rust_2018_idioms)]
-#![cfg(feature = "dist-tests")]
+//! `sccache --dist-auth` against a real auth0 tenant, through a browser.
 
+use crate::harness::{check_output, sccache_command};
 use fs_err as fs;
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
@@ -60,10 +60,6 @@ fn config_with_dist_auth(
         },
         ..Default::default()
     }
-}
-
-fn sccache_command() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_sccache"))
 }
 
 fn retry<F: FnMut() -> Option<T>, T>(interval: Duration, until: Duration, mut f: F) -> Option<T> {
@@ -133,17 +129,6 @@ struct SeleniumContainer {
     cid: String,
 }
 
-fn check_output(output: &Output) {
-    if !output.status.success() {
-        println!(
-            "===========\n{}\n==========\n\n\n\n=========\n{}\n===============\n\n\n",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        panic!()
-    }
-}
-
 impl SeleniumContainer {
     fn new() -> Self {
         // https://github.com/SeleniumHQ/docker-selenium#running-the-images
@@ -162,7 +147,7 @@ impl SeleniumContainer {
                 "selenium/standalone-chrome-debug:3.14.0",
             ];
             let output = Command::new("docker").args(args).output().unwrap();
-            check_output(&output);
+            check_output(output.clone()).unwrap();
             let stdout = String::from_utf8(output.stdout).unwrap();
             stdout.trim().to_owned()
         };
@@ -186,7 +171,7 @@ impl Drop for SeleniumContainer {
             String::from_utf8_lossy(&stdout),
             String::from_utf8_lossy(&stderr)
         );
-        check_output(&output);
+        check_output(output).unwrap();
     }
 }
 

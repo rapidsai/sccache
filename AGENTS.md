@@ -17,8 +17,11 @@ New behavior or a bug fix comes with a test:
   `mod test` block of the file you changed (`src/compiler/gcc.rs`,
   `src/compiler/nvcc.rs`, `src/cache/cache.rs`, ...)
 - end-to-end behavior (real compiler invocation, cache hit/miss, server
-  lifecycle): `tests/system.rs`, `tests/sccache_args.rs`,
-  `tests/sccache_cargo.rs`, `tests/dist.rs`, ...
+  lifecycle): a module of the `integration` test binary rooted at
+  `tests/main.rs` (`tests/c.rs`, `tests/preprocessor_cache.rs`,
+  `tests/rust.rs`, `tests/server.rs`, `tests/dist.rs`, ...), with shared
+  helpers in `tests/harness/`. `tests/dist.rs` also runs the
+  `tests/preprocessor_cache.rs` tests with a dist client.
 
 A new compiler flag is not "just a one-liner": if it changes what ends up in the
 cache key, it needs a test that would catch getting it wrong. A wrong cache key

@@ -1,5 +1,11 @@
-use super::{TC_CACHE_SIZE, prune_command};
-use crate::harness::write_json_cfg;
+use super::{
+    TC_CACHE_SIZE, TestDir, cargo_bin, prune_command, sccache_bin, sccache_debug, write_json_cfg,
+};
+#[cfg(any(unix, target_env = "msvc"))]
+use super::{
+    compilers::{Compiler, find_compiler},
+    init_logger,
+};
 use fs_err as fs;
 use sccache::{
     compiler::SourceFileDeps,
@@ -16,33 +22,36 @@ use std::{
     sync::atomic::{AtomicU16, Ordering},
 };
 
-pub fn make_sccache_client() -> (Option<tempfile::TempDir>, PathBuf, SccacheClient) {
-    let tempdir = tempfile::Builder::new()
-        .prefix("sccache_system_test")
-        .tempdir()
-        .unwrap();
+/// A client for a server with a local disk cache, configured by a file in a
+/// new temporary directory. Compile the test sources in that directory too.
+/// The server isn't started yet.
+pub fn make_sccache_client() -> (TestDir, SccacheClient) {
+    let tempdir = TestDir::new("sccache_system_test");
+    let tempdir_path = tempdir.path();
 
-    // Persist the tempdir if SCCACHE_DEBUG is defined
-    let (tempdir_path, maybe_tempdir) = if env::var("SCCACHE_DEBUG").is_ok() {
-        (tempdir.keep(), None)
-    } else {
-        (tempdir.path().to_path_buf(), Some(tempdir))
-    };
-
-    // Create the configurations
     let sccache_cfg = sccache_client_cfg(
-        &tempdir_path,
+        tempdir_path,
         sccache::config::defaults::default_disk_cache_size(),
     );
-    write_json_cfg(&tempdir_path, "sccache-cfg.json", &sccache_cfg);
-    let sccache_cached_cfg_path = tempdir_path.join("sccache-cached-cfg");
-    // Start the server daemon on a unique port
+    write_json_cfg(tempdir_path, "sccache-cfg.json", &sccache_cfg);
     let client = SccacheClient::new(
         &tempdir_path.join("sccache-cfg.json"),
-        &sccache_cached_cfg_path,
+        &tempdir_path.join("sccache-cached-cfg"),
     );
 
-    (maybe_tempdir, tempdir_path, client)
+    (tempdir, client)
+}
+
+/// Runs `test` with a new local server, if `compiler` is installed.
+#[cfg(any(unix, target_env = "msvc"))]
+pub fn with_local_server<T>(
+    compiler: &str,
+    test: impl FnOnce(&SccacheClient, &Compiler, &Path) -> T,
+) -> Option<T> {
+    init_logger();
+    let compiler = find_compiler(compiler)?;
+    let (tempdir, client) = make_sccache_client();
+    Some(test(&client.start(), &compiler, tempdir.path()))
 }
 
 pub fn sccache_client_cfg(data_dir: &Path, size: u64) -> ClientConfig {
@@ -77,6 +86,7 @@ pub fn sccache_client_cfg(data_dir: &Path, size: u64) -> ClientConfig {
     }
 }
 
+// Every client talks to its own server, so tests can run concurrently.
 static CLIENT_PORT: AtomicU16 = AtomicU16::new(4227);
 
 pub struct SccacheClient {
@@ -86,16 +96,16 @@ pub struct SccacheClient {
 
 impl SccacheClient {
     pub fn new_no_cfg() -> Self {
-        let path = env!("CARGO_BIN_EXE_sccache").into();
+        let path = sccache_bin().into();
         let port = CLIENT_PORT.fetch_add(1, Ordering::SeqCst);
 
         let mut envvars = vec![
             ("SCCACHE_SERVER_PORT".into(), port.to_string().into()),
-            ("SCCACHE_THREADS".into(), "8".into()),
+            ("SCCACHE_THREADS".into(), "4".into()),
         ];
 
         // Send daemon logs to a file if SCCACHE_DEBUG is defined
-        if env::var("SCCACHE_DEBUG").is_ok() {
+        if sccache_debug() {
             envvars.extend_from_slice(&[
                 // Allow overriding log level
                 (
@@ -120,11 +130,9 @@ impl SccacheClient {
     }
 
     pub fn new(cfg_path: &Path, cached_cfg_path: &Path) -> Self {
-        let mut this = Self::new_no_cfg();
-        this.envvars.push(("SCCACHE_CONF".into(), cfg_path.into()));
-        this.envvars
-            .push(("SCCACHE_CACHED_CONF".into(), cached_cfg_path.into()));
-        this
+        Self::new_no_cfg()
+            .with_env("SCCACHE_CONF", cfg_path)
+            .with_env("SCCACHE_CACHED_CONF", cached_cfg_path)
     }
 
     pub fn with_env<K: AsRef<OsStr>, V: AsRef<OsStr>>(mut self, key: K, val: V) -> Self {
@@ -134,6 +142,22 @@ impl SccacheClient {
     }
 
     pub fn start(self) -> Self {
+        self.start_server();
+        self
+    }
+
+    /// Restarts the server on the same port, with `vars` replacing any
+    /// earlier values.
+    pub fn restart_with_env(&mut self, vars: &[(&str, &OsStr)]) {
+        self.envvars
+            .extend(vars.iter().map(|(k, v)| (k.into(), v.into())));
+        self.start_server();
+    }
+
+    fn start_server(&self) {
+        // Servers don't time out, so one left on this port by an interrupted
+        // run would keep this one from starting.
+        self.stop();
         trace!("sccache --start-server");
         // Don't run this with run() because on Windows `wait_with_output`
         // will hang because the internal server process is not detached.
@@ -148,7 +172,6 @@ impl SccacheClient {
         {
             panic!("Failed to start local daemon");
         }
-        self
     }
 
     pub fn stop(&self) -> bool {
@@ -161,13 +184,26 @@ impl SccacheClient {
             .is_ok_and(|status| status.success())
     }
 
-    pub fn cmd(&self) -> Command {
-        let mut cmd = prune_command(Command::new(self.path.as_os_str()));
+    /// `program` with this client's environment instead of the test's
+    /// `SCCACHE_*` variables, so any sccache it runs uses this server.
+    pub fn command<S: AsRef<OsStr>>(&self, program: S) -> Command {
+        let mut cmd = prune_command(Command::new(program));
         cmd.envs(
             self.envvars
                 .iter()
                 .map(|(k, v)| (k.as_os_str(), v.as_os_str())),
         );
+        cmd
+    }
+
+    pub fn cmd(&self) -> Command {
+        self.command(&self.path)
+    }
+
+    /// `cargo`, with this client as the rustc wrapper.
+    pub fn cargo(&self) -> Command {
+        let mut cmd = self.command(cargo_bin());
+        cmd.env("RUSTC_WRAPPER", &self.path);
         cmd
     }
 
@@ -205,6 +241,11 @@ impl SccacheClient {
                 .map(|(k, v)| (k.as_os_str(), v.as_os_str())),
         )
         .unwrap_or_default()
+    }
+
+    /// Whether the server sends compilations to a dist scheduler.
+    pub fn is_dist(&self) -> bool {
+        self.config().dist.url.is_some()
     }
 
     pub fn compilations_cache(&self) -> config::cache::Disk {

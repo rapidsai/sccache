@@ -12,6 +12,9 @@ license = "Apache-2.0"
 readme = "README.md"
 repository = "https://github.com/mozilla/sccache/"
 
+# The files under tests/ are modules of the single `integration` test target.
+autotests = false
+
 [package.metadata.binstall]
 bin-dir = "sccache-v{ version }-{ target }/{ bin }{ binary-ext }"
 pkg-fmt = "tgz"
@@ -34,6 +37,10 @@ name = "sccache"
 [[bin]]
 name = "sccache-dist"
 required-features = ["dist-server"]
+
+[[test]]
+name = "integration"
+path = "tests/main.rs"
 
 # [profile.dev]
 # debug = "line-tables-only"
