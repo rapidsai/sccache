@@ -205,11 +205,14 @@ tracing-subscriber = { version = "0.3", features = [
 ], optional = true }
 version-compare = { version = "0.1.1", optional = true }
 
+# bench only (benches/sccache_bench.rs). As a dev-dependency it would be built
+# by every test build.
+divan = { package = "codspeed-divan-compat", version = "4", optional = true }
+
 [dev-dependencies]
 assert_cmd = "2.0.13"
 cc = "1.0"
 chrono = "0.4.42"
-divan = { package = "codspeed-divan-compat", version = "4" }
 filetime = "0.2"
 pastey = "0.2"
 predicates = "=3.1.0"
@@ -344,6 +347,8 @@ dist-server = [
 ]
 # Enables dist tests with external requirements
 dist-tests = ["dist-client", "dist-server"]
+# Enables benches/sccache_bench.rs
+bench = ["dep:divan"]
 
 [workspace]
 exclude = ["tests/test-crate"]
@@ -352,6 +357,7 @@ members = ["tests/integration/randomize_readdir"]
 [[bench]]
 harness = false
 name = "sccache_bench"
+required-features = ["bench"]
 test = false
 
 [lints]

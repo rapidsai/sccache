@@ -41,7 +41,7 @@ jobs:
 
       - name: Build benchmarks
         shell: bash
-        run: cargo codspeed build -m ${{ matrix.mode }}
+        run: cargo codspeed build -m ${{ matrix.mode }} --features bench
 
       - name: Run benchmarks
         uses: CodSpeedHQ/action@v4

@@ -18,6 +18,8 @@
 //! - Hash computation (BLAKE3) for cache keys
 //! - Time macro detection for preprocessor cache mode
 //! - LRU cache operations
+//!
+//! Run with `cargo bench --features bench`.
 
 use divan::{Bencher, black_box};
 use sccache::cache::{CacheRead, CacheWrite};

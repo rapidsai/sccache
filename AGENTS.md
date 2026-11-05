@@ -48,8 +48,8 @@ Before sending anything:
 
 ```sh
 cargo fmt -- --check
-cargo clippy --locked --all-targets -- -D warnings -A unknown-lints \
-    -A clippy::type_complexity -A clippy::new-without-default
+cargo clippy --locked --all-targets --features bench -- -D warnings \
+    -A unknown-lints -A clippy::type_complexity -A clippy::new-without-default
 cargo test --locked --lib --bins --tests
 ```
 
