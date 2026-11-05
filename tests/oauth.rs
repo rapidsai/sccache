@@ -1,5 +1,5 @@
 #![deny(rust_2018_idioms)]
-#![cfg(feature = "dist-client")]
+#![cfg(feature = "dist-tests")]
 
 use fs_err as fs;
 use std::io::{self, Read, Write};
@@ -191,10 +191,7 @@ impl Drop for SeleniumContainer {
 }
 
 #[tokio::test]
-#[cfg_attr(
-    not(all(target_os = "linux", target_arch = "x86_64", feature = "dist-tests")),
-    ignore
-)]
+#[cfg_attr(not(all(target_os = "linux", target_arch = "x86_64")), ignore)]
 async fn test_auth() {
     // Make sure the client auth port isn't in use, as sccache will gracefully fall back
     let client_auth_port = sccache::dist::client_auth::VALID_PORTS[0];

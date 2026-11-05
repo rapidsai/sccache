@@ -23,7 +23,7 @@ use sccache::{
 
 pub mod client;
 
-#[cfg(feature = "dist-server")]
+#[cfg(feature = "dist-tests")]
 pub mod dist;
 
 pub const TC_CACHE_SIZE: u64 = 2 * 1024 * 1024 * 1024; // 2GiB

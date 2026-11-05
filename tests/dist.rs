@@ -1,4 +1,4 @@
-#![cfg(all(feature = "dist-client", feature = "dist-server"))]
+#![cfg(feature = "dist-tests")]
 
 #[macro_use]
 extern crate log;
@@ -204,7 +204,6 @@ pub fn dist_test_sccache_client_cfg(
     sccache_cfg
 }
 
-#[cfg_attr(not(feature = "dist-tests"), ignore)]
 #[test_case("rabbitmq" ; "with rabbitmq")]
 #[test_case("redis" ; "with redis")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -267,7 +266,6 @@ async fn test_dist_cargo_build(message_broker: &str) -> Result<()> {
     Ok(())
 }
 
-#[cfg_attr(not(feature = "dist-tests"), ignore)]
 #[test_case("rabbitmq" ; "with rabbitmq")]
 #[test_case("redis" ; "with redis")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -300,7 +298,6 @@ async fn test_dist_cpp_disk_storage(message_broker: &str) -> Result<()> {
     Ok(())
 }
 
-#[cfg_attr(not(feature = "dist-tests"), ignore)]
 #[test_case("rabbitmq" ; "with rabbitmq")]
 #[test_case("redis" ; "with redis")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -348,7 +345,6 @@ async fn test_dist_cpp_toolchain(message_broker: &str) -> Result<()> {
     Ok(())
 }
 
-#[cfg_attr(not(feature = "dist-tests"), ignore)]
 #[test_case("rabbitmq" ; "with rabbitmq")]
 #[test_case("redis" ; "with redis")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -382,7 +378,6 @@ async fn test_dist_cpp_cloud_storage(message_broker: &str) -> Result<()> {
     Ok(())
 }
 
-#[cfg_attr(not(feature = "dist-tests"), ignore)]
 #[test_case("rabbitmq" ; "with rabbitmq")]
 #[test_case("redis" ; "with redis")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -422,7 +417,6 @@ async fn test_dist_cpp_server_restart(message_broker: &str) -> Result<()> {
     Ok(())
 }
 
-#[cfg_attr(not(feature = "dist-tests"), ignore)]
 #[test_case("rabbitmq" ; "with rabbitmq")]
 #[test_case("redis" ; "with redis")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -458,7 +452,6 @@ async fn test_dist_cpp_no_server_times_out(message_broker: &str) -> Result<()> {
     Ok(())
 }
 
-#[cfg_attr(not(feature = "dist-tests"), ignore)]
 #[test_case("rabbitmq" ; "with rabbitmq")]
 #[test_case("redis" ; "with redis")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -498,7 +491,6 @@ async fn test_dist_cpp_two_servers(message_broker: &str) -> Result<()> {
     Ok(())
 }
 
-#[cfg_attr(not(feature = "dist-tests"), ignore)]
 #[test_case("rabbitmq" ; "with rabbitmq")]
 #[test_case("redis" ; "with redis")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -535,7 +527,6 @@ async fn test_dist_cpp_errors_on_job_load_failures(message_broker: &str) -> Resu
     Ok(())
 }
 
-#[cfg_attr(not(feature = "dist-tests"), ignore)]
 #[test_case("rabbitmq" ; "with rabbitmq")]
 #[test_case("redis" ; "with redis")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -572,7 +563,6 @@ async fn test_dist_cpp_errors_on_toolchain_load_failures(message_broker: &str) -
     Ok(())
 }
 
-#[cfg_attr(not(feature = "dist-tests"), ignore)]
 #[test_case("rabbitmq" ; "with rabbitmq")]
 #[test_case("redis" ; "with redis")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -642,7 +632,6 @@ async fn test_dist_cpp_preprocesspr_cache_bug_2173(message_broker: &str) -> Resu
     Ok(())
 }
 
-#[cfg_attr(not(feature = "dist-tests"), ignore)]
 async fn test_dist_cuda_compiles(
     cuda_compiler: &Compiler,
     host_compiler: &Compiler,
@@ -725,7 +714,6 @@ async fn test_dist_cuda_compiles(
     Ok(())
 }
 
-#[cfg_attr(not(feature = "dist-tests"), ignore)]
 async fn test_dist_stdpar_compiles(compiler: &Compiler, message_broker: &str) -> Result<()> {
     let test_name = format!(
         "test_dist_stdpar_compiles_{}_{message_broker}",
@@ -762,7 +750,6 @@ async fn test_dist_stdpar_compiles(compiler: &Compiler, message_broker: &str) ->
 macro_rules! test_dist_if_compiler_available {
     ($name:ident, $compiler:ident, $compiler_name:expr) => {
         paste! {
-            #[cfg_attr(not(feature = "dist-tests"), ignore)]
             #[test_case("rabbitmq" ; "with rabbitmq")]
             #[test_case("redis" ; "with redis")]
             #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -791,7 +778,6 @@ test_dist_if_compiler_available!(stdpar, mpicxx, "mpic++");
 macro_rules! test_dist_if_cuda_compiler_available {
     ($cuda_compiler:ident, $host_compiler:ident, $cuda_compiler_name:expr, $host_compiler_name:expr) => {
         paste! {
-            #[cfg_attr(not(feature = "dist-tests"), ignore)]
             #[test_case("rabbitmq" ; "with rabbitmq")]
             #[test_case("redis" ; "with redis")]
             #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
