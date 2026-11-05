@@ -30,9 +30,7 @@ use std::{
     sync::Arc,
 };
 use tokio::{io::AsyncReadExt, process::ChildStdin};
-use tokio_util::compat::{
-    FuturesAsyncReadCompatExt, TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt,
-};
+use tokio_util::compat::{FuturesAsyncReadCompatExt, TokioAsyncReadCompatExt};
 use version_compare::Version;
 
 pub type BuildResult = std::result::Result<BuildOutput, BuildError>;
@@ -104,6 +102,40 @@ fn join_suffix<P: AsRef<Path>>(path: &Path, suffix: P) -> PathBuf {
         assert_eq!(components.next(), Some(path::Component::RootDir));
     }
     path.join(components)
+}
+
+// Like tar-rs' `append_dir_all` with `follow_symlinks(false)` and
+// `HeaderMode::Deterministic`, except that mtime is 0 rather than 1153704088,
+// which keeps the archive identical to what async-tar produced before.
+fn write_dir_as_tar<W: io::Write>(dst: W, dir: &Path) -> io::Result<W> {
+    let header = |meta: &std::fs::Metadata| {
+        let mut header = tar::Header::new_gnu();
+        header.set_metadata_in_mode(meta, tar::HeaderMode::Deterministic);
+        header.set_mtime(0);
+        header
+    };
+    let mut tar = tar::Builder::new(dst);
+    let mut stack = vec![(dir.to_path_buf(), true, false)];
+    while let Some((src, is_dir, is_symlink)) = stack.pop() {
+        let path = src.strip_prefix(dir).unwrap();
+        if is_dir {
+            for entry in fs::read_dir(&src)? {
+                let entry = entry?;
+                let file_type = entry.file_type()?;
+                stack.push((entry.path(), file_type.is_dir(), file_type.is_symlink()));
+            }
+            if path != Path::new("") {
+                tar.append_data(&mut header(&fs::metadata(&src)?), path, io::empty())?;
+            }
+        } else if is_symlink {
+            let target = fs::read_link(&src)?;
+            tar.append_link(&mut header(&fs::symlink_metadata(&src)?), path, target)?;
+        } else {
+            let file = fs::File::open(&src)?;
+            tar.append_data(&mut header(&file.metadata()?), path, file)?;
+        }
+    }
+    tar.into_inner()
 }
 
 #[derive(Clone, Debug)]
@@ -813,17 +845,14 @@ impl DockerBuilder {
                     "/",
                 ])
                 .kill_on_drop(true)
-                .check_piped(|stdin| async move {
-                    let mut inputs = async_tar::Builder::new(stdin.compat_write());
-                    inputs.follow_symlinks(false);
-                    inputs.mode(async_tar::HeaderMode::Deterministic);
-                    inputs.append_dir_all("", &inputs_dir).await?;
-                    let _ = inputs.into_inner().await?;
-                    // let inputs = async_compression::futures::bufread::ZlibDecoder::new(
-                    //     futures::io::BufReader::new(futures::io::AllowStdIo::new(inputs.reader())),
-                    // );
-                    // tokio::io::copy(&mut inputs.compat(), &mut stdin).await?;
-                    Ok(())
+                .check_piped(|stdin| {
+                    let inputs_dir = inputs_dir.to_path_buf();
+                    let stdin = tokio_util::io::SyncIoBridge::new(stdin);
+                    async move {
+                        sccache::util::spawn_blocking(move || write_dir_as_tar(stdin, &inputs_dir))
+                            .await??;
+                        Ok(())
+                    }
                 })
                 .await
                 .context("Failed to copy inputs into container")
@@ -1119,5 +1148,87 @@ impl BuilderIncoming for DockerBuilder {
             },
         ))
         .await;
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::write_dir_as_tar;
+    use std::fs::Permissions;
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    use std::path::{Path, PathBuf};
+    use tar::EntryType;
+
+    #[test]
+    fn test_write_dir_as_tar_headers_are_deterministic() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir(root.join("dir")).unwrap();
+        std::fs::write(root.join("dir/file"), b"contents").unwrap();
+        std::fs::write(root.join("dir/exe"), b"#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(root.join("dir/exe"), Permissions::from_mode(0o700)).unwrap();
+        symlink("dir/file", root.join("link")).unwrap();
+
+        let bytes = write_dir_as_tar(Vec::new(), root).unwrap();
+        assert_eq!(bytes, write_dir_as_tar(Vec::new(), root).unwrap());
+
+        let mut entries = vec![];
+        for entry in tar::Archive::new(bytes.as_slice()).entries().unwrap() {
+            let entry = entry.unwrap();
+            let header = entry.header();
+            assert_eq!(header.mtime().unwrap(), 0);
+            assert_eq!(header.uid().unwrap(), 0);
+            assert_eq!(header.gid().unwrap(), 0);
+            entries.push((
+                entry.path().unwrap().into_owned(),
+                header.entry_type(),
+                header.mode().unwrap(),
+                entry.link_name().unwrap().map(|p| p.into_owned()),
+            ));
+        }
+        // read_dir order is unspecified, but a directory precedes its contents.
+        let pos = |path: &str| entries.iter().position(|e| e.0 == Path::new(path)).unwrap();
+        assert!(pos("dir") < pos("dir/exe") && pos("dir") < pos("dir/file"));
+
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            entries,
+            [
+                ("dir".into(), EntryType::Directory, 0o755, None),
+                ("dir/exe".into(), EntryType::Regular, 0o755, None),
+                ("dir/file".into(), EntryType::Regular, 0o644, None),
+                (
+                    "link".into(),
+                    EntryType::Symlink,
+                    0o755,
+                    Some("dir/file".into())
+                ),
+            ]
+        );
+    }
+
+    // Names and link targets over 100 bytes don't fit the ustar header and need GNU
+    // long-name entries.
+    #[test]
+    fn test_write_dir_as_tar_long_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let long_dir = ["a".repeat(60), "b".repeat(60)].join("/");
+        let long_file = format!("{long_dir}/{}", "c".repeat(60));
+        std::fs::create_dir_all(root.join(&long_dir)).unwrap();
+        std::fs::write(root.join(&long_file), b"contents").unwrap();
+        symlink(&long_file, root.join("link")).unwrap();
+
+        let bytes = write_dir_as_tar(Vec::new(), root).unwrap();
+        let mut entries = vec![];
+        for entry in tar::Archive::new(bytes.as_slice()).entries().unwrap() {
+            let entry = entry.unwrap();
+            entries.push((
+                entry.path().unwrap().into_owned(),
+                entry.link_name().unwrap().map(|p| p.into_owned()),
+            ));
+        }
+        assert!(entries.contains(&(PathBuf::from(&long_file), None)));
+        assert!(entries.contains(&(PathBuf::from("link"), Some(PathBuf::from(&long_file)))));
     }
 }
