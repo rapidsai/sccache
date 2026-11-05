@@ -174,6 +174,51 @@ fn test_server_stats() {
     child.join().unwrap();
 }
 
+/// The other server tests listen on TCP; this one uses a Unix socket, like
+/// `SCCACHE_SERVER_UDS` does.
+#[cfg(unix)]
+#[test]
+fn test_server_unix_socket() {
+    let f = TestFixture::new();
+    let socket_path = f.tempdir.path().join("server.sock");
+    let cache_dir = f.tempdir.path().join("cache");
+    let (tx, rx) = mpsc::channel();
+    let handle = thread::spawn({
+        let socket_path = socket_path.clone();
+        move || {
+            let runtime = Runtime::new().unwrap();
+            let listener = {
+                let _guard = runtime.enter();
+                tokio::net::UnixListener::bind(&socket_path).unwrap()
+            };
+            let storage = Arc::new(DiskCache::new(
+                &cache_dir,
+                u64::MAX,
+                CacheMode::ReadWrite,
+                vec![],
+            ));
+            let srv: SccacheServer<_, Arc<Mutex<MockCommandCreator>>> =
+                SccacheServer::with_listener(
+                    crate::net::Listener::Unix(listener),
+                    runtime,
+                    Client::new(),
+                    DistClientContainer::new_disabled(),
+                    storage,
+                    Duration::from_secs(60),
+                    None,
+                );
+            tx.send(srv.local_addr().unwrap()).unwrap();
+            srv.run(futures::future::pending::<()>()).unwrap();
+        }
+    });
+    let addr = rx.recv().unwrap();
+    assert!(matches!(&addr, crate::net::SocketAddr::Unix(p) if *p == socket_path));
+    let info = request_stats(connect_to_server(&addr).unwrap()).unwrap();
+    assert_eq!(0, info.stats.compile_requests);
+    request_shutdown(connect_to_server(&addr).unwrap()).unwrap();
+    handle.join().unwrap();
+}
+
 #[test]
 fn test_server_unsupported_compiler() {
     let f = TestFixture::new();
