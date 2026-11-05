@@ -27,4 +27,4 @@ RUST_BACKTRACE="${RUST_BACKTRACE:-}" \
 CC="$(which gcc || which clang || which nvc)" \
 CXX="$(which g++ || which clang++ || which nvc++)" \
 CUDAHOSTCXX="$(which g++ || which clang++ || which nvc++)" \
-cargo test --profile dev -F all,vendored-openssl,dist-client,dist-server,dist-tests "$@"
+cargo test --profile dev --test integration -F all,vendored-openssl,dist-client,dist-server,dist-tests "$@"
