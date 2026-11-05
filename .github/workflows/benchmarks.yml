@@ -41,6 +41,8 @@ jobs:
 
       - name: Build benchmarks
         shell: bash
+        env:
+          CARGO_BUILD_JOBS: 2
         run: cargo codspeed build -m ${{ matrix.mode }} --features bench
 
       - name: Run benchmarks
