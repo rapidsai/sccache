@@ -1415,7 +1415,10 @@ where
         let mut has_toolchain = false;
         let mut job = None;
 
-        let mut should_retry = |err: &Error, job_id: Option<&str>, server_id: Option<&str>| {
+        let mut should_retry = |err: &Error,
+                                job_id: Option<&str>,
+                                server_id: Option<&str>,
+                                missing_inputs: &[String]| {
             use itertools::Itertools;
 
             let out_pretty = Some(out_pretty.as_str())
@@ -1424,7 +1427,15 @@ where
                 .chain(server_id.iter())
                 .join(", ");
 
-            if num_dist_attempts < dist_retry_limit {
+            if num_dist_attempts == 1.0f64 && !missing_inputs.is_empty() {
+                // Allow one retry if the local dist client mistakenly  believed that
+                // the dist remote still has inputs that it previously reported it had.
+                // If the job gets to a build server and it's missing some inputs, the
+                // build server will reject with exactly the inputs that are missing,
+                // which is the client's chance to send them again.
+                num_dist_attempts += 1.0;
+                true
+            } else if num_dist_attempts < dist_retry_limit {
                 info!(
                     "[{out_pretty}]: Distributed compilation error ({num_dist_attempts} of {dist_retry_limit}), retrying: {err:#}"
                 );
@@ -1448,7 +1459,7 @@ where
 
             macro_rules! retry_or_bail {
                 ($err:ident, $job_id:expr, $server_id:expr) => {{
-                    if should_retry(&$err, $job_id, $server_id) {
+                    if should_retry(&$err, $job_id, $server_id, &missing_inputs) {
                         tokio::time::sleep(retry_delay.next().unwrap()).await;
                         continue;
                     }

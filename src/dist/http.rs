@@ -1145,9 +1145,9 @@ mod client {
 
     use tokio_util::compat::FuturesAsyncReadCompatExt;
 
-    use std::collections::{BTreeMap, HashMap};
+    use std::collections::{BTreeMap, HashMap, HashSet};
     use std::path::{Path, PathBuf};
-    use std::sync::Arc;
+    use std::sync::{Arc, RwLock};
     use std::time::Duration;
 
     use super::{
@@ -1347,6 +1347,8 @@ mod client {
         tc_cache: Arc<cache::ClientToolchains>,
         /// Cache of source file hashes
         source_digest_cache: SourceFileCache,
+        /// Cache of source file hashes the server knows about
+        server_digest_cache: Arc<RwLock<HashSet<String>>>,
     }
 
     impl Client {
@@ -1392,6 +1394,7 @@ mod client {
                 put_job_input,
                 tc_cache: client_toolchains,
                 source_digest_cache: SourceFileCache::default(),
+                server_digest_cache: Default::default(),
             })
         }
 
@@ -1491,27 +1494,47 @@ mod client {
         async fn new_job(
             &self,
             toolchain: Toolchain,
-            inputs: Vec<String>,
+            mut inputs: Vec<String>,
         ) -> Result<NewJobResponse> {
-            bincode_req_fut(
+            {
+                let server_digest_cache = self.server_digest_cache.read().unwrap();
+                inputs.retain(|hash| !server_digest_cache.contains(hash));
+            }
+
+            let res = bincode_req_fut::<NewJobResponse>(
                 self.client
                     .post(urls::scheduler_new_job(&self.scheduler_url))
                     .header(http::header::ACCEPT, "application/octet-stream")
                     .bearer_auth(self.auth_token.clone())
                     .bincode(&NewJobRequest { toolchain, inputs })?,
             )
-            .await
+            .await?;
+
+            if !res.missing_inputs.is_empty() {
+                let mut server_digest_cache = self.server_digest_cache.write().unwrap();
+                for hash in res.missing_inputs.iter() {
+                    server_digest_cache.remove(hash);
+                }
+            }
+
+            Ok(res)
         }
 
         async fn put_job(&self, inputs: HashMap<String, JobInput>) -> Result<()> {
-            crate::util::try_join_all(inputs.into_iter().map(|(hash, input)| async move {
-                self.put_job_input
-                    .call(PutInputArgs(hash, input))
-                    .await
-                    .map(|(_, res)| res)
-            }))
-            .await
-            .map(|_| ())
+            let hashes =
+                crate::util::try_join_all(inputs.into_iter().map(|(hash, input)| async move {
+                    self.put_job_input
+                        .call(PutInputArgs(hash, input))
+                        .await
+                        .map(|(PutInputArgs(hash, _), _)| hash)
+                }))
+                .await?;
+
+            if !hashes.is_empty() {
+                self.server_digest_cache.write().unwrap().extend(hashes);
+            }
+
+            Ok(())
         }
 
         async fn run_job(
@@ -1524,7 +1547,7 @@ mod client {
             outputs: Vec<String>,
             save_outputs_as_job_input: bool,
         ) -> Result<RunJobResponse> {
-            bincode_req_fut(
+            let res = bincode_req_fut(
                 self.client
                     .post(urls::scheduler_run_job(&self.scheduler_url, job_id))
                     .header(http::header::ACCEPT, "application/octet-stream")
@@ -1538,7 +1561,16 @@ mod client {
                         save_outputs_as_job_input,
                     })?,
             )
-            .await
+            .await?;
+
+            if let RunJobResponse::MissingJobInputs { ref inputs, .. } = res {
+                let mut server_digest_cache = self.server_digest_cache.write().unwrap();
+                for hash in inputs {
+                    server_digest_cache.remove(hash);
+                }
+            }
+
+            Ok(res)
         }
 
         async fn del_job(&self, job_id: &str) -> Result<()> {
