@@ -46,7 +46,7 @@ jobs:
         run: cargo codspeed build -m ${{ matrix.mode }} --features bench
 
       - name: Run benchmarks
-        uses: CodSpeedHQ/action@v4
+        uses: CodSpeedHQ/action@af75f77f17a054769abefaa42fe8dc2975469b5f # v5.6.3
         continue-on-error: true
         env:
           CODSPEED_LOG: debug
