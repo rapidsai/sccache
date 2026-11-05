@@ -377,6 +377,25 @@ jobs:
           target: ${{ matrix.target }}
         if: ${{ !matrix.container }}
 
+      # Link the musl targets through the image's gcc driver with the toolchain's rust-lld
+      # instead of GNU ld. This is what `-Clinker-flavor=gnu-lld-cc -Clink-self-contained=+linker`
+      # does, but those still need `-Zunstable-options`. rustc puts its own
+      # <sysroot>/lib/rustlib/<host>/bin first on the linker's PATH, so this picks the rust-lld
+      # of whichever toolchain is building, including the nightly used for s390x.
+      - name: Link with rust-lld
+        if: ${{ contains(matrix.target, '-musl') }}
+        shell: bash
+        run: |
+          linker="$RUNNER_TEMP/cc-rust-lld"
+          cat > "$linker" <<"EOF"
+          #!/bin/sh
+          lld="$(command -v rust-lld)" || { echo "cc-rust-lld: rust-lld not found on PATH" >&2; exit 1; }
+          exec "${TARGET_CC:?}" -fuse-ld=lld "-B${lld%/*}/gcc-ld" "$@"
+          EOF
+          chmod +x "$linker"
+          target="$(echo '${{ matrix.target }}' | tr 'a-z-' 'A-Z_')"
+          echo "CARGO_TARGET_${target}_LINKER=$linker" >> "$GITHUB_ENV"
+
       - name: Install s390x cross-compilation toolchain
         if: ${{ matrix.target == 's390x-unknown-linux-gnu' }}
         run: |

@@ -23,6 +23,18 @@ rustup target add "$CARGO_BUILD_TARGET"
 rustup component add rustfmt clippy llvm-tools-preview
 rustup completions bash > /usr/share/bash-completion/completions/rustup
 
+# Link the musl target through the musl-cross gcc driver but with the rust-lld that ships
+# with the toolchain instead of GNU ld, which spends ~13s per debug binary. rustc puts
+# <sysroot>/lib/rustlib/<host>/bin first on the linker's PATH, so this always picks the
+# rust-lld of the toolchain doing the build.
+cat <<"EOF" > /usr/local/bin/musl-gcc-rust-lld
+#!/bin/sh
+lld="$(command -v rust-lld)" && exec "${TARGET_CC:?}" -fuse-ld=lld "-B${lld%/*}/gcc-ld" "$@"
+exec "${TARGET_CC:?}" "$@"
+EOF
+chmod +x /usr/local/bin/musl-gcc-rust-lld
+sed -i "/^\[target\.$CARGO_BUILD_TARGET\]/,/^\[/ s|^linker = .*|linker = \"/usr/local/bin/musl-gcc-rust-lld\"|" "$CARGO_HOME/config.toml"
+
 sed -i 's/HISTSIZE=.*/HISTSIZE=/g' /etc/skel/.bashrc
 sed -i 's/HISTFILESIZE=.*/HISTFILESIZE=/g' /etc/skel/.bashrc
 
