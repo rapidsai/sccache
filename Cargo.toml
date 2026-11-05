@@ -176,9 +176,9 @@ zstd = "0.13"
 axum = { version = "0.8", features = ["http2", "macros"], optional = true }
 axum-extra = { version = "0.12", features = ["typed-header"], optional = true }
 axum-server = { version = "0.8", default-features = false, optional = true }
-celery = { git = "https://github.com/trxcllnt/rusty-celery.git", branch = "fix/retries", optional = true, default-features = false, features = [
+celery = { git = "https://github.com/trxcllnt/rusty-celery.git", branch = "sccache", optional = true, default-features = false, features = [
   "codegen",
-  "extra_content_types",
+  "msgpack",
   "rustls-native-certs",
   "hickory-dns",
   "rustls--ring",

@@ -474,4 +474,26 @@ mod task_impls {
                 ))
             })
     }
+
+    #[cfg(test)]
+    mod test {
+        use super::server_status;
+        use crate::dist::StatusUpdate;
+        use celery::protocol::{Message, MessageContentType};
+
+        // celery silently falls back to JSON when a content type's feature is off, and sccache
+        // only enables its MessagePack support.
+        #[test]
+        fn task_messages_round_trip_as_msgpack() {
+            let status = StatusUpdate {
+                id: "server-1".into(),
+                ..Default::default()
+            };
+            let task = server_status::new(status).with_content_type(MessageContentType::MsgPack);
+            let message = Message::try_from(task).unwrap();
+            assert_eq!(message.properties.content_type, "application/x-msgpack");
+            let (params, _) = message.body::<server_status>().unwrap().parts();
+            assert_eq!(params.status.id, "server-1");
+        }
+    }
 }
