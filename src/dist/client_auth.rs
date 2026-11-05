@@ -6,7 +6,6 @@ use http_body_util::Full;
 use hyper::Response;
 use serde::Serialize;
 use std::collections::HashMap;
-use std::error::Error as StdError;
 use std::io;
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::sync::mpsc;
@@ -232,6 +231,7 @@ mod code_grant_pkce {
     }
 
     pub fn code_to_token(
+        runtime: &tokio::runtime::Runtime,
         token_url: &str,
         client_id: &str,
         code_verifier: &str,
@@ -246,8 +246,10 @@ mod code_grant_pkce {
             redirect_uri,
         };
         let client = new_reqwest_client(None);
-        let runtime = tokio::runtime::Handle::current();
-        let res = runtime.block_on(client.post(token_url).json(&token_request).send())?;
+        // Only `Runtime::block_on` drives a current-thread runtime's IO and timers; blocking
+        // on its handle from outside would wait on the request forever.
+        let res =
+            crate::util::block_on(runtime, client.post(token_url).json(&token_request).send())?;
         if !res.status().is_success() {
             bail!(
                 "Sending code to {} failed, HTTP error: {}",
@@ -257,8 +259,7 @@ mod code_grant_pkce {
         }
 
         let (token, expires_at) = handle_token_response(
-            runtime
-                .block_on(res.json())
+            crate::util::block_on(runtime, res.json())
                 .context("Failed to parse token response as JSON")?,
         )?;
         if expires_at - Instant::now() < MIN_TOKEN_VALIDITY {
@@ -412,6 +413,8 @@ mod implicit {
 
 use tokio::net::TcpListener;
 
+type ServeFn = fn(hyper::Request<hyper::body::Incoming>) -> Result<Response<Full<Bytes>>>;
+
 struct HyperBuilderWrap {
     listener: TcpListener,
 }
@@ -426,21 +429,14 @@ impl HyperBuilderWrap {
     // Typing out a hyper service is a major pain, so let's focus on our simple
     // `fn(Request<Body>) -> Response<Body>` handler functions; to reduce repetition
     // we create a relevant service using hyper's own helper factory functions.
-    async fn serve<F>(&mut self, sfn: F) -> io::Result<()>
-    where
-        F: Fn(hyper::Request<hyper::body::Incoming>) -> anyhow::Result<Response<Full<Bytes>>>
-            + Send
-            + 'static
-            + Copy
-            + Sync,
-    {
+    async fn serve(&mut self, sfn: ServeFn) -> io::Result<()> {
         use hyper::server::conn::http1;
         use hyper_util::rt::tokio::TokioIo;
 
         loop {
             let (tcp, _) = self.listener.accept().await?;
             let io = TokioIo::new(tcp);
-            tokio::task::spawn(async move {
+            util::spawn_detached(async move {
                 let conn = http1::Builder::new().serve_connection(
                     io,
                     hyper::service::service_fn(|req| async move {
@@ -478,15 +474,21 @@ where
 
 /// Try to bind a TCP stream to any of the available port out of [`VALID_PORTS`].
 async fn try_bind() -> Result<HyperBuilderWrap> {
-    // Try all the valid ports
-    for &port in VALID_PORTS {
-        let mut addrs = ("localhost", port)
+    let addrs = VALID_PORTS.iter().map(|&port| {
+        ("localhost", port)
             .to_socket_addrs()
-            .expect("Failed to interpret localhost address to listen on");
-        let addr = addrs
+            .expect("Failed to interpret localhost address to listen on")
             .next()
-            .expect("Expected at least one address in parsed socket address");
+            .expect("Expected at least one address in parsed socket address")
+    });
+    match bind_first_free(addrs.collect()).await? {
+        Some(server) => Ok(server),
+        None => bail!("Could not bind to any valid port: ({VALID_PORTS:?})"),
+    }
+}
 
+async fn bind_first_free(addrs: Vec<SocketAddr>) -> Result<Option<HyperBuilderWrap>> {
+    for addr in addrs {
         // Hyper binds with reuseaddr and reuseport so binding won't fail as you'd expect on Linux
         match TcpStream::connect(addr) {
             // Already open
@@ -500,20 +502,45 @@ async fn try_bind() -> Result<HyperBuilderWrap> {
         }
 
         match HyperBuilderWrap::try_bind(addr).await {
-            Ok(s) => return Ok(s),
-            Err(ref err)
-                if err
-                    .source()
-                    .and_then(|err| err.downcast_ref::<io::Error>())
-                    .map(|err| err.kind() == io::ErrorKind::AddrInUse)
-                    .unwrap_or(false) =>
-            {
-                continue;
-            }
+            Ok(s) => return Ok(Some(s)),
+            // Bound by someone else, but not listening (yet).
+            Err(ref err) if err.kind() == io::ErrorKind::AddrInUse => continue,
             Err(e) => return Err(e).with_context(|| format!("Failed to bind to {addr}")),
         }
     }
-    bail!("Could not bind to any valid port: ({VALID_PORTS:?})")
+    Ok(None)
+}
+
+fn redirect_uri(port: u16) -> String {
+    format!("http://localhost:{port}/redirect")
+}
+
+// Runs the redirect server until a handler fires the shutdown sender handed
+// to `start`. Both flows share it, with `sfn` and `start` type-erased, so the
+// server, its task and the `block_on` futures are only instantiated once.
+fn run_auth_server(
+    runtime: &tokio::runtime::Runtime,
+    sfn: ServeFn,
+    start: Box<dyn FnOnce(u16, oneshot::Sender<()>) + '_>,
+) -> Result<u16> {
+    let mut server = util::block_on(runtime, async move { try_bind().await })?;
+    let port = server.local_addr().port();
+    let handle = util::spawn_on(runtime.handle(), async move {
+        server.serve(sfn).await.unwrap();
+    });
+
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    start(port, shutdown_tx);
+    info!("Listening on http://localhost:{port} with 1 thread.");
+    println!("sccache: Please visit http://localhost:{port} in your browser");
+
+    util::block_on(runtime, async move {
+        if let Err(e) = shutdown_rx.await {
+            warn!("Something went wrong while waiting for auth server shutdown: {e}");
+        }
+    });
+    handle.abort();
+    Ok(port)
 }
 
 // https://auth0.com/docs/api-auth/tutorials/authorization-code-grant-pkce
@@ -523,86 +550,246 @@ pub fn get_token_oauth2_code_grant_pkce(
     token_url: &str,
 ) -> Result<String> {
     let runtime = new_client_runtime()?;
-    let mut server = runtime.block_on(async move { try_bind().await })?;
-    let port = server.local_addr().port();
-
     let _guard = runtime.enter();
-    let handle = util::spawn_on(runtime.handle(), async move {
-        server.serve(code_grant_pkce::serve).await.unwrap();
-    });
-    let redirect_uri = format!("http://localhost:{port}/redirect");
-    let auth_state_value = Uuid::new_v4().as_simple().to_string();
     let (verifier, challenge) = code_grant_pkce::generate_verifier_and_challenge()?;
-    code_grant_pkce::finish_url(
-        client_id,
-        &mut auth_url,
-        &redirect_uri,
-        &auth_state_value,
-        &challenge,
-    );
-
-    info!("Listening on http://localhost:{port} with 1 thread.");
-    println!("sccache: Please visit http://localhost:{port} in your browser");
-    let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let (code_tx, code_rx) = mpsc::sync_channel(1);
-    let state = code_grant_pkce::State {
-        auth_url: auth_url.to_string(),
-        auth_state_value,
-        code_tx,
-        shutdown_tx: Some(shutdown_tx),
-    };
-    *code_grant_pkce::STATE.lock().unwrap() = Some(state);
-
-    runtime.block_on(async move {
-        if let Err(e) = shutdown_rx.await {
-            warn!("Something went wrong while waiting for auth server shutdown: {e}");
-        }
-    });
-    handle.abort();
+    let port = run_auth_server(
+        &runtime,
+        code_grant_pkce::serve,
+        Box::new(|port, shutdown_tx| {
+            let auth_state_value = Uuid::new_v4().as_simple().to_string();
+            code_grant_pkce::finish_url(
+                client_id,
+                &mut auth_url,
+                &redirect_uri(port),
+                &auth_state_value,
+                &challenge,
+            );
+            let state = code_grant_pkce::State {
+                auth_url: auth_url.to_string(),
+                auth_state_value,
+                code_tx,
+                shutdown_tx: Some(shutdown_tx),
+            };
+            *code_grant_pkce::STATE.lock().unwrap() = Some(state);
+        }),
+    )?;
 
     info!("Server finished, using code to request token");
     let code = code_rx
         .try_recv()
         .expect("Hyper shutdown but code not available - internal error");
-    code_grant_pkce::code_to_token(token_url, client_id, &verifier, &code, &redirect_uri)
-        .context("Failed to convert oauth2 code into a token")
+    code_grant_pkce::code_to_token(
+        &runtime,
+        token_url,
+        client_id,
+        &verifier,
+        &code,
+        &redirect_uri(port),
+    )
+    .context("Failed to convert oauth2 code into a token")
 }
 
 // https://auth0.com/docs/api-auth/tutorials/implicit-grant
 pub fn get_token_oauth2_implicit(client_id: &str, mut auth_url: Url) -> Result<String> {
     let runtime = new_client_runtime()?;
-    let mut server = runtime.block_on(async move { try_bind().await })?;
-    let port = server.local_addr().port();
     let _guard = runtime.enter();
-    let handle = util::spawn_on(runtime.handle(), async move {
-        server.serve(implicit::serve).await.unwrap();
-    });
-
-    let redirect_uri = format!("http://localhost:{port}/redirect");
-    let auth_state_value = Uuid::new_v4().as_simple().to_string();
-    implicit::finish_url(client_id, &mut auth_url, &redirect_uri, &auth_state_value);
-
-    info!("Listening on http://localhost:{port} with 1 thread.");
-    println!("sccache: Please visit http://localhost:{port} in your browser");
-    let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let (token_tx, token_rx) = mpsc::sync_channel(1);
-    let state = implicit::State {
-        auth_url: auth_url.to_string(),
-        auth_state_value,
-        token_tx,
-        shutdown_tx: Some(shutdown_tx),
-    };
-    *implicit::STATE.lock().unwrap() = Some(state);
-
-    runtime.block_on(async move {
-        if let Err(e) = shutdown_rx.await {
-            warn!("Something went wrong while waiting for auth server shutdown: {e}");
-        }
-    });
-    handle.abort();
+    run_auth_server(
+        &runtime,
+        implicit::serve,
+        Box::new(|port, shutdown_tx| {
+            let auth_state_value = Uuid::new_v4().as_simple().to_string();
+            implicit::finish_url(
+                client_id,
+                &mut auth_url,
+                &redirect_uri(port),
+                &auth_state_value,
+            );
+            let state = implicit::State {
+                auth_url: auth_url.to_string(),
+                auth_state_value,
+                token_tx,
+                shutdown_tx: Some(shutdown_tx),
+            };
+            *implicit::STATE.lock().unwrap() = Some(state);
+        }),
+    )?;
 
     info!("Server finished, returning token");
     Ok(token_rx
         .try_recv()
         .expect("Hyper shutdown but token not available - internal error"))
+}
+
+// The flows bind fixed ports, which Windows may have reserved.
+#[cfg(all(test, unix))]
+mod test {
+    use super::*;
+    use serial_test::serial;
+    use std::io::{Read, Write};
+
+    fn request(port: u16, method: &str, path: &str) -> io::Result<(u16, String)> {
+        let addr = ("localhost", port).to_socket_addrs()?.next().unwrap();
+        let mut stream = TcpStream::connect(addr)?;
+        write!(
+            stream,
+            "{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        )?;
+        let mut response = String::new();
+        stream.read_to_string(&mut response)?;
+        let (head, body) = response.split_once("\r\n\r\n").unwrap_or((&response, ""));
+        let status = head
+            .split(' ')
+            .nth(1)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        Ok((status, body.to_owned()))
+    }
+
+    // The flow publishes its auth url once the redirect server is listening.
+    fn wait_for_auth_url(auth_url: fn() -> Option<String>) -> (String, HashMap<String, String>) {
+        for _ in 0..1000 {
+            if let Some(url) = auth_url() {
+                let params = query_pairs(&url).unwrap();
+                return (url, params);
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("the auth server did not start");
+    }
+
+    fn redirect_port(params: &HashMap<String, String>) -> u16 {
+        let port = Url::parse(&params["redirect_uri"]).unwrap().port().unwrap();
+        assert!(VALID_PORTS.contains(&port));
+        port
+    }
+
+    #[test]
+    #[serial(client_auth)]
+    fn implicit_flow_returns_token_saved_by_redirect_page() {
+        let auth_url = Url::parse("https://auth.invalid/authorize").unwrap();
+        let flow = std::thread::spawn(|| get_token_oauth2_implicit("test-client", auth_url));
+        let (auth_url, params) = wait_for_auth_url(|| {
+            let state = implicit::STATE.lock().unwrap();
+            state.as_ref().map(|state| state.auth_url.clone())
+        });
+        assert_eq!(params["client_id"], "test-client");
+        assert_eq!(params["response_type"], "token");
+        let port = redirect_port(&params);
+
+        let get = |path| request(port, "GET", path).unwrap();
+        assert_eq!(get("/"), (200, REDIRECT_WITH_AUTH_JSON.to_owned()));
+        let auth_detail = serde_json::to_string(&auth_url).unwrap();
+        assert_eq!(get("/auth_detail.json"), (200, auth_detail));
+        assert_eq!(get("/redirect").0, 200);
+        assert_eq!(get("/missing"), (404, String::new()));
+
+        let save_auth = |state: &str| {
+            let query =
+                format!("access_token=tok&token_type=Bearer&expires_in=604800&state={state}");
+            request(port, "POST", &format!("/save_auth?{query}"))
+        };
+        assert_eq!(save_auth("mismatched").unwrap().0, 500);
+        // The server shuts down once it has the token, possibly before replying.
+        let _ = save_auth(&params["state"]);
+        assert_eq!(flow.join().unwrap().unwrap(), "tok");
+    }
+
+    // Answers one token request over h2c, which is what `new_reqwest_client` speaks, and
+    // hands back the request body.
+    fn token_server() -> (String, mpsc::Receiver<serde_json::Value>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let url = format!("http://{}/token", listener.local_addr().unwrap());
+        let (body_tx, body_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let runtime = new_client_runtime().unwrap();
+            runtime.block_on(async move {
+                let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+                let (tcp, _) = listener.accept().await.unwrap();
+                let service = hyper::service::service_fn(
+                    move |req: hyper::Request<hyper::body::Incoming>| {
+                        let body_tx = body_tx.clone();
+                        async move {
+                            let body = http_body_util::BodyExt::collect(req.into_body())
+                                .await?
+                                .to_bytes();
+                            body_tx.send(serde_json::from_slice(&body).unwrap()).unwrap();
+                            let token = r#"{"access_token":"tok","token_type":"Bearer","expires_in":604800}"#;
+                            Ok::<_, hyper::Error>(Response::new(Full::new(Bytes::from(token))))
+                        }
+                    },
+                );
+                let _ = hyper::server::conn::http2::Builder::new(
+                    hyper_util::rt::TokioExecutor::new(),
+                )
+                .serve_connection(hyper_util::rt::TokioIo::new(tcp), service)
+                .await;
+            });
+        });
+        (url, body_rx)
+    }
+
+    #[test]
+    #[serial(client_auth)]
+    fn code_grant_pkce_flow_requests_token_after_redirect() {
+        let (token_url, token_request) = token_server();
+        let auth_url = Url::parse("https://auth.invalid/authorize").unwrap();
+        let (flow_tx, flow_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let res = get_token_oauth2_code_grant_pkce("test-client", auth_url, &token_url);
+            flow_tx.send(res).unwrap();
+        });
+        let (auth_url, params) = wait_for_auth_url(|| {
+            let state = code_grant_pkce::STATE.lock().unwrap();
+            state.as_ref().map(|state| state.auth_url.clone())
+        });
+        assert_eq!(params["client_id"], "test-client");
+        assert_eq!(params["response_type"], "code");
+        assert_eq!(params["code_challenge_method"], "S256");
+        assert!(!params["code_challenge"].is_empty());
+        let port = redirect_port(&params);
+
+        let get = |path: &str| request(port, "GET", path);
+        assert_eq!(get("/").unwrap(), (200, REDIRECT_WITH_AUTH_JSON.to_owned()));
+        let auth_detail = serde_json::to_string(&auth_url).unwrap();
+        assert_eq!(get("/auth_detail.json").unwrap(), (200, auth_detail));
+        assert_eq!(get("/missing").unwrap(), (404, String::new()));
+        assert_eq!(get("/redirect?code=c&state=mismatched").unwrap().0, 500);
+        // The server shuts down once it has the code, possibly before replying.
+        let _ = get(&format!("/redirect?code=c&state={}", params["state"]));
+
+        // A hang here means the token request isn't being driven by the client runtime.
+        let token = flow_rx
+            .recv_timeout(Duration::from_secs(60))
+            .expect("the token request did not finish");
+        assert_eq!(token.unwrap(), "tok");
+        let body = token_request.recv().unwrap();
+        assert_eq!(body["client_id"], "test-client");
+        assert_eq!(body["code"], "c");
+        assert_eq!(body["grant_type"], "authorization_code");
+        assert_eq!(body["redirect_uri"], params["redirect_uri"].as_str());
+        assert!(!body["code_verifier"].as_str().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn bind_skips_address_bound_by_another_socket() {
+        // Bound without SO_REUSEADDR and not listening: connecting is refused, but binding
+        // fails with AddrInUse.
+        let busy = tokio::net::TcpSocket::new_v4().unwrap();
+        busy.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let busy_addr = busy.local_addr().unwrap();
+        let free_addr = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap();
+
+        let server = bind_first_free(vec![busy_addr, free_addr])
+            .await
+            .unwrap()
+            .expect("the free address was not bound");
+        assert_eq!(server.local_addr(), free_addr);
+        assert!(bind_first_free(vec![busy_addr]).await.unwrap().is_none());
+    }
 }
