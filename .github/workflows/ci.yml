@@ -269,7 +269,8 @@ jobs:
         env:
           CARGO_INCREMENTAL: "0"
           RUSTC_WRAPPER: ""
-          RUSTFLAGS: "-Cinstrument-coverage -Ccodegen-units=1 -Copt-level=0 -Coverflow-checks=off"
+          # Only instrument when coverage is collected (same condition as the grcov steps).
+          RUSTFLAGS: ${{ (needs.checks.outputs.has-codecov-token == 'true' && matrix.no_coverage != 'true') && '-Cinstrument-coverage -Copt-level=0 -Coverflow-checks=off' || '-Copt-level=0 -Coverflow-checks=off' }}
 
       - name: Upload failure
         if: failure()
