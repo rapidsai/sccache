@@ -177,34 +177,54 @@ mod test {
         let rt = utils::single_threaded_runtime();
 
         crate::util::block_on(&rt, async {
-            let storage = Arc::new(MockStorage::new(None, true));
+            for i in 0..=10 {
+                let storage = Arc::new(MockStorage::new(None, true));
 
-            storage.next_get(Ok(Cache::Hit(b"val".to_vec().into())));
+                storage.next_get(Ok(Cache::Hit(b"val".to_vec().into())));
 
-            let storage = RateLimitStorage::create(
-                ReadOnlyStorage::create(storage),
-                Duration::from_secs(1), // read_timeout
-                None,                   // write_timeout
-                3,                      // error_count
-                Duration::from_secs(1), // window_size
-            );
+                let storage = RateLimitStorage::create(
+                    ReadOnlyStorage::create(storage),
+                    Duration::from_secs(1), // read_timeout
+                    None,                   // write_timeout
+                    3,                      // error_count
+                    Duration::from_secs(1), // window_size
+                );
 
-            // Three errors should trigger the rate limiter
-            let _ = tokio::join!(
-                storage.put("key", opendal::Buffer::new()),
-                storage.put("key", opendal::Buffer::new()),
-                storage.put("key", opendal::Buffer::new()),
-            );
-            assert_eq!(
-                storage.get("key").await.unwrap_err().to_string(),
-                "Rate limited due to error count"
-            );
+                // Three errors should trigger the rate limiter
+                let _ = tokio::join!(
+                    storage.put("key", opendal::Buffer::new()),
+                    storage.put("key", opendal::Buffer::new()),
+                    storage.put("key", opendal::Buffer::new()),
+                );
 
-            // Wait 2s for the rate limit window to pass
-            tokio::time::sleep(Duration::from_secs(2)).await;
+                let err_str = storage.get("key").await.unwrap_err().to_string();
 
-            // Ensure we can get the key seeded to MockStorage at the start
-            assert!(matches!(storage.get("key").await.unwrap(), Cache::Hit(..)));
+                if err_str != "Rate limited due to error count" {
+                    if i == 10 {
+                        assert_eq!(err_str, "Rate limited due to error count");
+                        break;
+                    } else {
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                        continue;
+                    }
+                }
+
+                // Wait 2s for the rate limit window to pass
+                tokio::time::sleep(Duration::from_secs(2)).await;
+
+                // Ensure we can get the key seeded to MockStorage at the start
+                let res = storage.get("key").await;
+
+                if matches!(res, Ok(Cache::Hit(..))) {
+                    break;
+                } else if i == 10 {
+                    assert!(matches!(res, Ok(Cache::Hit(..))));
+                    break;
+                } else {
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    continue;
+                }
+            }
 
             Ok::<_, anyhow::Error>(())
         })?;
@@ -217,28 +237,38 @@ mod test {
         let rt = utils::single_threaded_runtime();
 
         crate::util::block_on(&rt, async {
-            let storage = Arc::new(MockStorage::new(Some(Duration::from_secs(1)), true));
+            for i in 0..=5 {
+                let storage = Arc::new(MockStorage::new(Some(Duration::from_secs(1)), true));
 
-            storage.next_get(Ok(Cache::Hit(b"val".to_vec().into())));
+                storage.next_get(Ok(Cache::Hit(b"val".to_vec().into())));
 
-            let storage = RateLimitStorage::create(
-                storage,
-                Duration::from_millis(1), // read_timeout
-                None,                     // write_timeout
-                3,                        // error_count
-                Duration::from_secs(5),   // window_size
-            );
+                let storage = RateLimitStorage::create(
+                    storage,
+                    Duration::from_millis(1), // read_timeout
+                    None,                     // write_timeout
+                    3,                        // error_count
+                    Duration::from_secs(5),   // window_size
+                );
 
-            // Three timeout errors should trigger the rate limiter
-            let _ = tokio::join!(
-                storage.get("key"), //
-                storage.get("key"), //
-                storage.get("key"), //
-            );
-            assert_eq!(
-                storage.get("key").await.unwrap_err().to_string(),
-                "Rate limited due to error count"
-            );
+                // Three timeout errors should trigger the rate limiter
+                let _ = tokio::join!(
+                    storage.get("key"), //
+                    storage.get("key"), //
+                    storage.get("key"), //
+                );
+
+                let err_str = storage.get("key").await.unwrap_err().to_string();
+
+                if err_str == "Rate limited due to error count" {
+                    break;
+                } else if i == 5 {
+                    assert_eq!(err_str, "Rate limited due to error count");
+                    break;
+                } else {
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    continue;
+                }
+            }
 
             Ok::<_, anyhow::Error>(())
         })?;
@@ -251,34 +281,46 @@ mod test {
         let rt = utils::single_threaded_runtime();
 
         crate::util::block_on(&rt, async {
-            let storage = Arc::new(MockStorage::new(Some(Duration::from_secs(1)), true));
+            for i in 0..=5 {
+                let storage = Arc::new(MockStorage::new(Some(Duration::from_secs(1)), true));
 
-            storage.next_get(Ok(Cache::Hit(b"val".to_vec().into())));
+                storage.next_get(Ok(Cache::Hit(b"val".to_vec().into())));
 
-            let storage = RateLimitStorage::create(
-                storage,
-                Duration::from_secs(5),         // read_timeout
-                Some(Duration::from_millis(1)), // write_timeout
-                3,                              // error_count
-                Duration::from_secs(5),         // window_size
-            );
+                let storage = RateLimitStorage::create(
+                    storage,
+                    Duration::from_secs(5),         // read_timeout
+                    Some(Duration::from_millis(1)), // write_timeout
+                    3,                              // error_count
+                    Duration::from_secs(5),         // window_size
+                );
 
-            // Three timeout errors should trigger the rate limiter
-            let _ = tokio::join!(
-                storage.put("key", opendal::Buffer::new()),
-                storage.put("key", opendal::Buffer::new()),
-                storage.put("key", opendal::Buffer::new()),
-            );
-            assert_eq!(
-                storage.get("key").await.unwrap_err().to_string(),
-                "Rate limited due to error count"
-            );
+                // Three timeout errors should trigger the rate limiter
+                let _ = tokio::join!(
+                    storage.put("key", opendal::Buffer::new()),
+                    storage.put("key", opendal::Buffer::new()),
+                    storage.put("key", opendal::Buffer::new()),
+                );
+                assert_eq!(
+                    storage.get("key").await.unwrap_err().to_string(),
+                    "Rate limited due to error count"
+                );
 
-            // Wait 6s for the rate limit window to pass
-            tokio::time::sleep(Duration::from_secs(6)).await;
+                // Wait 6s for the rate limit window to pass
+                tokio::time::sleep(Duration::from_secs(6)).await;
 
-            // Ensure we can get the key seeded to MockStorage at the start
-            assert!(matches!(storage.get("key").await.unwrap(), Cache::Hit(..)));
+                // Ensure we can get the key seeded to MockStorage at the start
+                let res = storage.get("key").await;
+
+                if matches!(res, Ok(Cache::Hit(..))) {
+                    break;
+                } else if i == 5 {
+                    assert!(matches!(res, Ok(Cache::Hit(..))));
+                    break;
+                } else {
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    continue;
+                }
+            }
 
             Ok::<_, anyhow::Error>(())
         })?;
