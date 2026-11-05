@@ -118,9 +118,10 @@ mime = "0.3"
 notify-debouncer-full = { version = "0.7", optional = true }
 object = "0.37"
 opendal = { version = "0.58.1", default-features = false }
-opendal-http-transport-reqwest = { version = "0.58.1", optional = true }
+opendal-http-transport-reqwest = { version = "0.58.1", optional = true, default-features = false, features = [
+  "rustls-no-provider",
+] }
 opendal-layer-logging = { version = "0.58.1", optional = true }
-openssl = { version = "0.10.81", optional = true }
 rand = "0.8.4"
 regex = "1.10.3"
 regex_static = "0.1.1"
@@ -130,7 +131,7 @@ reqwest = { version = "0.13", default-features = false, features = [
   "hickory-dns",
   "http2",
   "json",
-  "rustls",
+  "rustls-no-provider",
   "stream",
   "system-proxy",
 ], optional = true }
@@ -305,7 +306,7 @@ webdav = [
 # Enable features that will build a vendored version of openssl and
 # statically linked with it, instead of linking against the system-wide openssl
 # dynamically or statically.
-vendored-openssl = ["openssl?/vendored", "reqwest?/native-tls-vendored"]
+vendored-openssl = ["reqwest?/native-tls-vendored"]
 # Enable features that require unstable features of Nightly Rust.
 unstable = []
 # Enables distributed support in the sccache client
@@ -336,7 +337,6 @@ dist-server = [
   "metrics",
   "metrics-util",
   "nix",
-  "openssl",
   "reqwest",
   "syslog",
   "tower-http",

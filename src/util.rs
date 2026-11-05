@@ -1792,11 +1792,20 @@ pub fn daemonize(_preserve_fds: &[std::os::windows::io::RawHandle]) -> Result<()
     Ok(())
 }
 
+/// reqwest is built with `rustls-no-provider` so that aws-lc isn't compiled,
+/// which makes it panic when building a rustls-backed client unless a
+/// process-wide crypto provider is installed. Install ring, as sccache-dist
+/// does; a provider that is already installed is kept.
+pub fn install_crypto_provider() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}
+
 #[cfg(any(feature = "dist-server", feature = "dist-client"))]
 pub fn new_reqwest_client<'a, C>(config: C) -> reqwest::Client
 where
     C: Into<Option<&'a crate::config::client::dist::Networking>>,
 {
+    install_crypto_provider();
     let builder = reqwest::Client::builder()
         .user_agent(format!(
             "{}/{}",
@@ -4179,6 +4188,13 @@ mod tests {
         let h1 = Digest::from_file(t1.path()).await.unwrap().finish();
         let h2 = Digest::from_file(t2.path()).await.unwrap().finish();
         assert_ne!(h1, h2);
+    }
+
+    #[test]
+    #[cfg(any(feature = "dist-server", feature = "dist-client"))]
+    fn test_new_reqwest_client_installs_crypto_provider() {
+        let _client = super::new_reqwest_client(None);
+        assert!(rustls::crypto::CryptoProvider::get_default().is_some());
     }
 
     #[test]

@@ -278,6 +278,8 @@ async fn test_auth_with_config(dist_auth: sccache::config::client::dist::Auth) {
 }
 
 async fn login() {
+    // thirtyfour's WebDriver builds a reqwest client.
+    sccache::util::install_crypto_provider();
     let caps = DesiredCapabilities::chrome();
     let driver = WebDriver::new("http://localhost:4444/wd/hub", caps)
         .await

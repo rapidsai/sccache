@@ -93,6 +93,7 @@ async fn fetch_taskcluster_token(url: &str, scope: &str) -> Result<String> {
     debug!("gcs: start to load token from: {url}");
 
     let user_agent = format!("{}/{}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
+    crate::util::install_crypto_provider();
     let client = Client::builder().user_agent(user_agent).build()?;
     let res = client.get(url).send().await?;
 

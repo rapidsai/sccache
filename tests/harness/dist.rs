@@ -521,6 +521,7 @@ impl SchedulerHandle {
         HTTPUrl::from_url(reqwest::Url::parse(&url).unwrap())
     }
     pub async fn status(&self) -> Result<SchedulerStatus> {
+        sccache::util::install_crypto_provider();
         let req = reqwest::Client::builder()
             .build()?
             .get(scheduler_status_url(&self.url().to_url()))

@@ -6,6 +6,7 @@ use reqwest::ClientBuilder;
 /// the server side).
 pub fn set_user_agent() -> HttpTransporter {
     let user_agent = format!("{}/{}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
+    crate::util::install_crypto_provider();
     let client = ClientBuilder::new().user_agent(user_agent).build().unwrap();
     HttpTransporter::new(ReqwestTransport::new(client))
 }

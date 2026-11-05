@@ -266,6 +266,7 @@ impl ValidJWTCheck {
     ) -> Result<Self> {
         let mut keys = HashMap::new();
 
+        crate::util::install_crypto_provider();
         for url in jwks_url {
             let res = reqwest::get(url)
                 .await
