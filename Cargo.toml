@@ -2,7 +2,7 @@
 # Should match .rustfmt.toml
 edition = "2024"
 name = "sccache"
-rust-version = "1.91.0"
+rust-version = "1.92.0"
 version = "0.18.0-rapids.14"
 
 categories = ["command-line-utilities", "development-tools::build-utils"]

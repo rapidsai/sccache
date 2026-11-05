@@ -37,7 +37,7 @@ jobs:
         with:
           components: ${{ matrix.component }}
           # Oldest supported version, keep in sync with README.md
-          toolchain: "1.91.0"
+          toolchain: "1.92.0"
 
       - name: clippy version
         run: cargo clippy --version
@@ -81,44 +81,44 @@ jobs:
         include:
           - os: ubuntu-22.04
             # Oldest supported version, keep in sync with README.md
-            rustc: "1.91.0"
+            rustc: "1.92.0"
             extra_desc: C++ dist-tests
             test_targets: --test integration
             extra_args: --no-default-features --features=dist-tests dist::test_dist_cpp_
           - os: ubuntu-22.04
             # Oldest supported version, keep in sync with README.md
-            rustc: "1.91.0"
+            rustc: "1.92.0"
             extra_desc: C++ dist-tests (changes)
             test_targets: --test integration
             extra_args: --no-default-features --features=dist-tests dist::test_dist_deps_dependency_changes_
           - os: ubuntu-22.04
             # Oldest supported version, keep in sync with README.md
-            rustc: "1.91.0"
+            rustc: "1.92.0"
             extra_desc: C++ dist-tests (__DATE__)
             test_targets: --test integration
             extra_args: --no-default-features --features=dist-tests dist::test_dist_deps_macros_date_
           - os: ubuntu-22.04
             # Oldest supported version, keep in sync with README.md
-            rustc: "1.91.0"
+            rustc: "1.92.0"
             extra_desc: C++ dist-tests (__TIME__)
             test_targets: --test integration
             extra_args: --no-default-features --features=dist-tests dist::test_dist_deps_macros_time_
           - os: ubuntu-22.04
             # Oldest supported version, keep in sync with README.md
-            rustc: "1.91.0"
+            rustc: "1.92.0"
             extra_desc: C++ dist-tests (__TIMESTAMP__)
             test_targets: --test integration
             extra_args: --no-default-features --features=dist-tests dist::test_dist_deps_macros_timestamp_
           - os: ubuntu-22.04
             # Oldest supported version, keep in sync with README.md
-            rustc: "1.91.0"
+            rustc: "1.92.0"
             cuda: "13.3"
             extra_desc: cuda13.3 dist-tests
             test_targets: --test integration
             extra_args: --no-default-features --features=dist-tests dist::test_dist_cuda_
           - os: ubuntu-22.04
             # Oldest supported version, keep in sync with README.md
-            rustc: "1.91.0"
+            rustc: "1.92.0"
             extra_desc: cargo dist-tests
             test_targets: --test integration
             extra_args: --no-default-features --features=dist-tests dist::test_dist_cargo_ -- --test-threads=1
@@ -155,7 +155,7 @@ jobs:
           - os: ubuntu-24.04
             cuda: "12.9"
             # Oldest supported version, keep in sync with README.md
-            rustc: "1.91.0"
+            rustc: "1.92.0"
             extra_desc: cuda12.9
           # # M1 CPU
           - os: macos-15
@@ -163,7 +163,7 @@ jobs:
           - os: windows-2022
             cuda: "12.4"
             # Oldest supported version, keep in sync with README.md
-            rustc: "1.91.0"
+            rustc: "1.92.0"
             extra_args: --no-fail-fast
             notest_cuda_compilers: clang++
             extra_desc: cuda12.4
@@ -183,7 +183,7 @@ jobs:
           - os: windows-2025-vs2026
             cuda: "13.3"
             # Oldest supported version, keep in sync with README.md
-            rustc: "1.91.0"
+            rustc: "1.92.0"
             extra_args: --no-fail-fast
             notest_cuda_compilers: clang++
             extra_desc: cuda13.3
