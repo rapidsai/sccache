@@ -23,12 +23,20 @@ pkg-fmt = "zip"
 [package.metadata.binstall.overrides.aarch64-pc-windows-msvc]
 pkg-fmt = "zip"
 
+[lib]
+# There are no runnable doc examples, but `cargo test` would still have rustdoc
+# expand the whole crate just to report them as ignored.
+doctest = false
+
 [[bin]]
 name = "sccache"
 
 [[bin]]
 name = "sccache-dist"
 required-features = ["dist-server"]
+
+# [profile.dev]
+# debug = "line-tables-only"
 
 [profile.test]
 debug = false # save disk space
@@ -91,7 +99,7 @@ hyper-util = { version = "0.1.21", optional = true, features = [
 is_executable = { version = "1.0.4" }
 itertools = "0.14"
 jobserver = "0.1"
-jwt = { package = "jsonwebtoken", version = "9", optional = true }
+jwt = { package = "jsonwebtoken", version = "9", optional = true, default-features = false }
 libc = "0.2.153"
 linked-hash-map = "0.5"
 log = "0.4"
@@ -114,7 +122,10 @@ rustls = { version = "0.23", default-features = false, features = [
 
 mime = "0.3"
 notify-debouncer-full = { version = "0.7", optional = true }
-object = "0.37"
+object = { version = "0.37", default-features = false, features = [
+  "read",
+  "std",
+] }
 opendal = { version = "0.58.1", default-features = false }
 opendal-http-transport-reqwest = { version = "0.58.1", optional = true, default-features = false, features = [
   "rustls-no-provider",
@@ -122,7 +133,6 @@ opendal-http-transport-reqwest = { version = "0.58.1", optional = true, default-
 opendal-layer-logging = { version = "0.58.1", optional = true }
 rand = "0.8.4"
 regex = "1.10.3"
-regex_static = "0.1.1"
 reqwest = { version = "0.13", default-features = false, features = [
   "charset",
   "hickory-dns",
@@ -145,7 +155,7 @@ serde_with = { version = "3" }
 sha2 = { version = "0.10.8", optional = true }
 shlex = "2.0.1"
 strip-ansi-escapes = "0.2"
-sysinfo = "0.33"
+sysinfo = { version = "0.33", default-features = false, features = ["system"] }
 tar = "0.4.46"
 tempfile = "3"
 tokio = { version = "1", features = ["full"] }
@@ -160,7 +170,7 @@ tokio-util = { version = "0.7", features = [
   "rt",
 ] }
 toml = "0.9"
-tower = { version = "0.4", features = ["util"] }
+tower = { version = "0.5", default-features = false }
 typed-path = "0.12.0"
 unit-prefix = "0.5"
 url = { version = "2", optional = true }
@@ -173,7 +183,7 @@ zip = { version = "0.6", default-features = false }
 zstd = "0.13"
 
 # dist-server only
-axum = { version = "0.8", features = ["http2", "macros"], optional = true }
+axum = { version = "0.8", features = ["http2"], optional = true }
 axum-extra = { version = "0.12", features = ["typed-header"], optional = true }
 axum-server = { version = "0.8", default-features = false, optional = true }
 celery = { git = "https://github.com/trxcllnt/rusty-celery.git", branch = "sccache", optional = true, default-features = false, features = [
