@@ -78,8 +78,11 @@ impl Gcc {
         let pragma_once_fix = Arc::new(
             crate::compiler::util::build_gcc_pragma_once_fix(
                 executable.as_ref(),
-                ([] as [&OsStr; 0]).into_iter(),
-                env_vars.clone(),
+                &[],
+                &env_vars
+                    .clone()
+                    .map(|(k, v)| (k.as_ref().to_owned(), v.as_ref().to_owned()))
+                    .collect::<Vec<_>>(),
             )
             .await
             .unwrap_or_else(|_| PathBuf::new()),
@@ -229,8 +232,13 @@ impl CCompilerImpl for Gcc {
         &self,
         ParseArgs { arguments, cwd, .. }: ParseArgs<'_>,
     ) -> CompilerArguments<ParsedArguments> {
-        let mut parsed_args =
-            parse_arguments(arguments, cwd, &ARGS[..], self.gplusplus, self.kind());
+        let mut parsed_args = parse_arguments(
+            arguments,
+            cwd,
+            (&ARGS[..], &[]),
+            self.gplusplus,
+            self.kind(),
+        );
         if let CompilerArguments::Ok(ref mut parsed_args) = parsed_args {
             // Rewrite -march=native to the current CPU architecture to
             // ensure the correct architecture is used if dist compiling
@@ -267,22 +275,7 @@ impl CCompilerImpl for Gcc {
             executable,
             parsed_args,
             cwd,
-            [("LD_PRELOAD".into(), "".into())]
-                .iter()
-                .chain(env_vars.iter())
-                .cloned()
-                .map(|(key, mut val)| {
-                    //
-                    if key == "LD_PRELOAD" {
-                        if !val.is_empty() {
-                            val.push(":");
-                        }
-                        if !self.pragma_once_fix.as_os_str().is_empty() {
-                            val.push(self.pragma_once_fix.as_os_str());
-                        }
-                    }
-                    (key, val)
-                }),
+            &env_with_pragma_once_fix(env_vars, &self.pragma_once_fix),
             self.kind(),
             tolerate_failure,
         )
@@ -478,16 +471,17 @@ counted_array!(pub static ARGS: [ArgInfo<ArgData>; _] = [
 /// Otherwise, return `CompilerArguments::Ok(ParsedArguments)`, with
 /// the `ParsedArguments` struct containing information parsed from
 /// `arguments`.
-pub fn parse_arguments<S>(
+///
+/// `arg_info` is gcc's table and the calling compiler's table, which complements
+/// or overrides it (gcc passes an empty one). Taking the tables as one concrete
+/// type keeps this large function to a single instantiation.
+pub fn parse_arguments(
     arguments: &[OsString],
     cwd: &Path,
-    arg_info: S,
+    arg_info: (&'static [ArgInfo<ArgData>], &'static [ArgInfo<ArgData>]),
     plusplus: bool,
     kind: CCompilerKind,
-) -> CompilerArguments<ParsedArguments>
-where
-    S: SearchableArgInfo<ArgData> + Clone,
-{
+) -> CompilerArguments<ParsedArguments> {
     let mut output_arg = None;
     let mut module_output_path = None;
     let mut module_only_flag = false;
@@ -539,7 +533,7 @@ where
     // and interpreting it as a list of more arguments.
     let it = ExpandIncludeFile::new(cwd, arguments);
 
-    let mut args_iter = ArgsIter::new(it, arg_info.clone());
+    let mut args_iter = ArgsIter::new(it, arg_info);
     if kind == CCompilerKind::Clang {
         args_iter = args_iter.with_double_dashes();
     }
@@ -1196,19 +1190,36 @@ fn module_artifact_descriptor(
     }
 }
 
-pub async fn generate_dependencies<
-    T,
-    Cwd: AsRef<Path>,
-    Exe: AsRef<Path>,
-    Key: AsRef<OsStr>,
-    Var: AsRef<OsStr>,
-    Envs: Iterator<Item = (Key, Var)> + Clone,
->(
+/// `env_vars` with the `#pragma once` fix appended to `LD_PRELOAD`, which is set
+/// first in case `env_vars` doesn't have it.
+pub fn env_with_pragma_once_fix(
+    env_vars: &[(OsString, OsString)],
+    pragma_once_fix: &Path,
+) -> Vec<(OsString, OsString)> {
+    [("LD_PRELOAD".into(), "".into())]
+        .iter()
+        .chain(env_vars.iter())
+        .cloned()
+        .map(|(key, mut val)| {
+            if key == "LD_PRELOAD" {
+                if !val.is_empty() {
+                    val.push(":");
+                }
+                if !pragma_once_fix.as_os_str().is_empty() {
+                    val.push(pragma_once_fix.as_os_str());
+                }
+            }
+            (key, val)
+        })
+        .collect()
+}
+
+pub async fn generate_dependencies<T>(
     creator: &T,
-    executable: Exe,
+    executable: &Path,
     parsed_args: &ParsedArguments,
-    cwd: Cwd,
-    env_vars: Envs,
+    cwd: &Path,
+    env_vars: &[(OsString, OsString)],
     kind: CCompilerKind,
     tolerate_failure: bool,
 ) -> Result<(Vec<PathBuf>, Duration)>
@@ -1448,11 +1459,11 @@ where
             .chain(parsed_args.double_dash_input.then_some(OsStr::new("--")))
             .chain(std::iter::once(parsed_args.input.as_os_str()));
 
-        let mut cmd = creator.clone().new_command_sync(executable.as_ref());
+        let mut cmd = creator.clone().new_command_sync(executable);
 
-        cmd.current_dir(cwd.as_ref())
+        cmd.current_dir(cwd)
             .env_clear()
-            .envs(env_vars.clone());
+            .envs(env_vars.iter().cloned());
 
         for arg in args {
             cmd.arg(arg);
@@ -1495,11 +1506,11 @@ where
             .chain(parsed_args.double_dash_input.then_some(OsStr::new("--")))
             .chain(std::iter::once(parsed_args.input.as_os_str()));
 
-        let mut cmd = creator.clone().new_command_sync(executable.as_ref());
+        let mut cmd = creator.clone().new_command_sync(executable);
 
-        cmd.current_dir(cwd.as_ref())
+        cmd.current_dir(cwd)
             .env_clear()
-            .envs(env_vars.clone());
+            .envs(env_vars.iter().cloned());
 
         for arg in args {
             cmd.arg(arg);
@@ -1534,7 +1545,7 @@ where
             parse_dependencies(
                 &parsed_args.input,
                 parsed_args.structured_depfile_format.as_deref(),
-                &read_depfile(cwd.as_ref().join(depfile)).await?,
+                &read_depfile(cwd.join(depfile)).await?,
             )?
         } else {
             vec![]
@@ -1543,7 +1554,7 @@ where
             &parsed_args.input,
             None,
             &if let Some(depfile) = system_depsfile {
-                read_depfile(cwd.as_ref().join(depfile)).await?
+                read_depfile(cwd.join(depfile)).await?
             } else {
                 bytes_to_str(output.stdout)?
             },
@@ -1561,7 +1572,7 @@ where
 
 pub async fn read_depfile<'a, P: AsRef<Path>>(depfile: P) -> Result<std::borrow::Cow<'a, str>> {
     let depfile = depfile.as_ref();
-    tokio::fs::read(depfile)
+    crate::util::async_fs::read(depfile)
         .await
         .with_context(|| format!("{}", depfile.display()))
         // Avoid dropping Windows wide chars in paths
@@ -1902,7 +1913,13 @@ mod test {
         plusplus: bool,
     ) -> CompilerArguments<ParsedArguments> {
         let args = arguments.iter().map(OsString::from).collect::<Vec<_>>();
-        parse_arguments(&args, ".".as_ref(), &ARGS[..], plusplus, CCompilerKind::Gcc)
+        parse_arguments(
+            &args,
+            ".".as_ref(),
+            (&ARGS[..], &[]),
+            plusplus,
+            CCompilerKind::Gcc,
+        )
     }
 
     fn parse_arguments_clang(
@@ -1917,6 +1934,34 @@ mod test {
             plusplus,
             CCompilerKind::Clang,
         )
+    }
+
+    #[test]
+    fn test_env_with_pragma_once_fix() {
+        let env = |vars: &[(&str, &str)]| -> Vec<(OsString, OsString)> {
+            vars.iter().map(|&(k, v)| (k.into(), v.into())).collect()
+        };
+        let fix = Path::new("/tmp/fix.so");
+        assert_eq!(
+            env_with_pragma_once_fix(&env(&[("PATH", "/bin"), ("CC", "gcc")]), fix),
+            env(&[
+                ("LD_PRELOAD", "/tmp/fix.so"),
+                ("PATH", "/bin"),
+                ("CC", "gcc")
+            ])
+        );
+        assert_eq!(
+            env_with_pragma_once_fix(&env(&[("PATH", "/bin"), ("LD_PRELOAD", "a.so")]), fix),
+            env(&[
+                ("LD_PRELOAD", "/tmp/fix.so"),
+                ("PATH", "/bin"),
+                ("LD_PRELOAD", "a.so:/tmp/fix.so")
+            ])
+        );
+        assert_eq!(
+            env_with_pragma_once_fix(&env(&[("PATH", "/bin")]), Path::new("")),
+            env(&[("LD_PRELOAD", ""), ("PATH", "/bin")])
+        );
     }
 
     #[test]

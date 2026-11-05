@@ -63,9 +63,9 @@ impl Nvhpc {
             .arg("-showme:command");
 
         let exe = if let Ok(out) = run_input_output(cmd, None).await {
-            which::which(
+            crate::util::which(
                 // Remove the trailing newlines (if present)
-                bytes_to_str(out.stdout).ok()?.trim(),
+                bytes_to_str(out.stdout).ok()?.trim().as_ref(),
             )
             .ok()
             .unwrap_or_else(|| exe.to_path_buf())
@@ -195,7 +195,7 @@ impl CCompilerImpl for Nvhpc {
             executable,
             parsed_args,
             cwd,
-            env_vars.iter().cloned(),
+            env_vars,
             self.kind(),
             tolerate_failure,
         )

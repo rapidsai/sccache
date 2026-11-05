@@ -655,10 +655,26 @@ where
     /// Return the state of any `--color` option passed to the compiler.
     fn color_mode(&self) -> ColorMode;
 
+    /// A descriptive string about the file that we're going to be producing.
+    ///
+    /// This is primarily intended for debug logging and such, not for actual
+    /// artifact generation.
+    fn output_pretty(&self) -> Cow<'_, str>;
+
+    fn box_clone(&self) -> Box<dyn CompilerHasher<T>>;
+
+    fn language(&self) -> Language;
+
+    fn get_executable(&self) -> &Path;
+}
+
+// An inherent method on the trait object rather than a provided trait method,
+// which would be compiled again for every implementor.
+impl<T: CommandCreatorSync> dyn CompilerHasher<T> {
     /// Look up a cached compile result in `storage`. If not found, run the
     /// compile and store the result.
     #[allow(clippy::too_many_arguments)]
-    async fn get_cached_or_compile(
+    pub async fn get_cached_or_compile(
         self: Box<Self>,
         service: &server::SccacheService<T>,
         dist_client: Option<Arc<dyn dist::Client>>,
@@ -730,7 +746,7 @@ where
                 deps_cache_write.map(|deps_cache_write| {
                     // Immediately drive the dependency cache write so it
                     // runs concurrently to cache lookups and compilations
-                    runtime.spawn(deps_cache_write)
+                    crate::util::spawn_detached_on(&runtime, deps_cache_write)
                 }),
             ),
             Err(err) => {
@@ -880,18 +896,6 @@ where
         }
         .with_context(|| format!("Failed to cache `{out_pretty}`"))
     }
-
-    /// A descriptive string about the file that we're going to be producing.
-    ///
-    /// This is primarily intended for debug logging and such, not for actual
-    /// artifact generation.
-    fn output_pretty(&self) -> Cow<'_, str>;
-
-    fn box_clone(&self) -> Box<dyn CompilerHasher<T>>;
-
-    fn language(&self) -> Language;
-
-    fn get_executable(&self) -> &Path;
 }
 
 struct CacheLookupOrCompile<'a, T: CommandCreatorSync> {
@@ -1708,10 +1712,10 @@ where
                 let dir = out.dir.as_path();
                 let path = out.path.as_path();
 
-                tokio::fs::try_exists(dir)
+                crate::util::async_fs::try_exists(dir)
                     .and_then(|exists| async move {
                         if !exists {
-                            tokio::fs::create_dir_all(dir).await
+                            crate::util::async_fs::create_dir_all(dir).await
                         } else {
                             Ok(())
                         }
@@ -1781,7 +1785,7 @@ where
                 // Do our best to clean up. We may end up deleting a file that we just wrote over
                 // the top of, but it's better to clean up too much than too little
                 for path in output_paths.iter() {
-                    if let Err(e) = tokio::fs::remove_file(path).await
+                    if let Err(e) = crate::util::async_fs::remove_file(path).await
                         && e.kind() != io::ErrorKind::NotFound
                     {
                         debug!(
@@ -2069,7 +2073,7 @@ pub async fn write_temp_file(
     contents: Vec<u8>,
 ) -> Result<(TempDir, PathBuf)> {
     let path = path.to_owned();
-    pool.spawn_blocking(move || {
+    crate::util::spawn_blocking_on(pool, move || {
         let dir = crate::util::temp_dir().context("Failed to create temp dir")?;
         let src = dir.path().join(path);
         let mut file = File::create(&src)?;
@@ -2153,7 +2157,7 @@ where
             .find(|(k, _)| k == "PATH")
             .map(|(_, v)| v.as_os_str());
 
-        which::which_in("nvcc", env_path, cwd).ok()
+        crate::util::which_in(OsStr::new("nvcc"), env_path, cwd).ok()
     }
     // Resolve compiler avoiding ccache wrappers to prevent double-caching.
     .map(|nvcc| resolve_compiler_avoiding_wrapper(&nvcc, env));
@@ -2606,7 +2610,7 @@ where
         .map(|(_, v)| v.clone())
         .or_else(|| env::var_os("PATH"));
 
-    which::which_in(name, paths, cwd).ok()
+    crate::util::which_in(OsStr::new(name), paths.as_deref(), cwd).ok()
 }
 
 /// Identify the assembler `executable` hands the compilation off to.
@@ -4054,23 +4058,22 @@ LLVM version: 6.0",
             o => panic!("Bad result from parse_arguments: {o:?}"),
         };
         let hasher2 = hasher.clone();
-        let (cached, res) = runtime
-            .block_on(async {
-                hasher2
-                    .get_cached_or_compile(
-                        &service,
-                        None,
-                        creator.clone(),
-                        arguments.clone(),
-                        cwd.to_path_buf(),
-                        vec![],
-                        CacheControl::Default,
-                        pool.clone(),
-                        pending.increment(),
-                    )
-                    .await
-            })
-            .unwrap();
+        let (cached, res) = crate::util::block_on(&runtime, async {
+            hasher2
+                .get_cached_or_compile(
+                    &service,
+                    None,
+                    creator.clone(),
+                    arguments.clone(),
+                    cwd.to_path_buf(),
+                    vec![],
+                    CacheControl::Default,
+                    pool.clone(),
+                    pending.increment(),
+                )
+                .await
+        })
+        .unwrap();
         // Ensure that the dependency file was created.
         assert!(fs::metadata(&dep).map(|m| m.len() > 0).unwrap());
         // Ensure that the object file was created.
@@ -4091,23 +4094,22 @@ LLVM version: 6.0",
         next_command(&creator, Ok(MockChild::new(exit_status(0), "", "")));
         // There should be no actual compiler invocation.
         let hasher2 = hasher.clone();
-        let (cached, res) = runtime
-            .block_on(async {
-                hasher2
-                    .get_cached_or_compile(
-                        &service,
-                        None,
-                        creator,
-                        arguments,
-                        cwd.to_path_buf(),
-                        vec![],
-                        CacheControl::Default,
-                        pool,
-                        pending.increment(),
-                    )
-                    .await
-            })
-            .unwrap();
+        let (cached, res) = crate::util::block_on(&runtime, async {
+            hasher2
+                .get_cached_or_compile(
+                    &service,
+                    None,
+                    creator,
+                    arguments,
+                    cwd.to_path_buf(),
+                    vec![],
+                    CacheControl::Default,
+                    pool,
+                    pending.increment(),
+                )
+                .await
+        })
+        .unwrap();
         // Ensure that the object file was created.
         assert!(fs::metadata(&obj).map(|m| m.len() > 0).unwrap());
         assert_eq!(CompileResult::CacheHit(Duration::new(0, 0)), cached);
@@ -4207,23 +4209,22 @@ LLVM version: 6.0",
             o => panic!("Bad result from parse_arguments: {o:?}"),
         };
         let hasher2 = hasher.clone();
-        let (cached, res) = runtime
-            .block_on(async {
-                hasher2
-                    .get_cached_or_compile(
-                        &service,
-                        Some(dist_client.clone()),
-                        creator.clone(),
-                        arguments.clone(),
-                        cwd.to_path_buf(),
-                        vec![],
-                        CacheControl::Default,
-                        pool.clone(),
-                        pending.increment(),
-                    )
-                    .await
-            })
-            .unwrap();
+        let (cached, res) = crate::util::block_on(&runtime, async {
+            hasher2
+                .get_cached_or_compile(
+                    &service,
+                    Some(dist_client.clone()),
+                    creator.clone(),
+                    arguments.clone(),
+                    cwd.to_path_buf(),
+                    vec![],
+                    CacheControl::Default,
+                    pool.clone(),
+                    pending.increment(),
+                )
+                .await
+        })
+        .unwrap();
         // Ensure that the dependency file was created.
         assert!(fs::metadata(&dep).map(|m| m.len() > 0).unwrap());
         // Ensure that the object file was created.
@@ -4250,23 +4251,22 @@ LLVM version: 6.0",
         });
         // There should be no actual compiler invocation.
         let hasher2 = hasher.clone();
-        let (cached, res) = runtime
-            .block_on(async {
-                hasher2
-                    .get_cached_or_compile(
-                        &service,
-                        Some(dist_client.clone()),
-                        creator,
-                        arguments,
-                        cwd.to_path_buf(),
-                        vec![],
-                        CacheControl::Default,
-                        pool,
-                        pending.increment(),
-                    )
-                    .await
-            })
-            .unwrap();
+        let (cached, res) = crate::util::block_on(&runtime, async {
+            hasher2
+                .get_cached_or_compile(
+                    &service,
+                    Some(dist_client.clone()),
+                    creator,
+                    arguments,
+                    cwd.to_path_buf(),
+                    vec![],
+                    CacheControl::Default,
+                    pool,
+                    pending.increment(),
+                )
+                .await
+        })
+        .unwrap();
         // Ensure that the object file was created.
         assert!(fs::metadata(&obj).map(|m| m.len() > 0).unwrap());
         assert_eq!(CompileResult::CacheHit(Duration::new(0, 0)), cached);
@@ -4361,8 +4361,9 @@ LLVM version: 6.0",
         // The cache will return an error.
         storage.next_get(Err(anyhow!("Source Error")));
         storage.next_get(Err(anyhow!("Object Error")));
-        let (cached, res) = runtime
-            .block_on(hasher.get_cached_or_compile(
+        let (cached, res) = crate::util::block_on(
+            &runtime,
+            hasher.get_cached_or_compile(
                 &service,
                 None,
                 creator,
@@ -4372,8 +4373,9 @@ LLVM version: 6.0",
                 CacheControl::Default,
                 pool,
                 pending.increment(),
-            ))
-            .unwrap();
+            ),
+        )
+        .unwrap();
         // Ensure that the dependency file was created.
         assert!(fs::metadata(&dep).map(|m| m.len() > 0).unwrap());
         // Ensure that the object file was created.
@@ -4483,8 +4485,9 @@ LLVM version: 6.0",
         };
         storage.next_get(Err(anyhow!("Source error")));
         storage.next_get(Ok(Cache::Hit(entry.into())));
-        let (cached, _res) = runtime
-            .block_on(hasher.get_cached_or_compile(
+        let (cached, _res) = crate::util::block_on(
+            &runtime,
+            hasher.get_cached_or_compile(
                 &service,
                 None,
                 creator,
@@ -4494,8 +4497,9 @@ LLVM version: 6.0",
                 CacheControl::Default,
                 pool,
                 pending.increment(),
-            ))
-            .unwrap();
+            ),
+        )
+        .unwrap();
         // Ensure that the dependency file was created.
         assert!(fs::metadata(&dep).map(|m| m.len() > 0).unwrap());
         match cached {
@@ -4600,23 +4604,22 @@ LLVM version: 6.0",
             o => panic!("Bad result from parse_arguments: {o:?}"),
         };
         let hasher2 = hasher.clone();
-        let (cached, res) = runtime
-            .block_on(async {
-                hasher2
-                    .get_cached_or_compile(
-                        &service,
-                        None,
-                        creator.clone(),
-                        arguments.clone(),
-                        cwd.to_path_buf(),
-                        vec![],
-                        CacheControl::Default,
-                        pool.clone(),
-                        pending.increment(),
-                    )
-                    .await
-            })
-            .unwrap();
+        let (cached, res) = crate::util::block_on(&runtime, async {
+            hasher2
+                .get_cached_or_compile(
+                    &service,
+                    None,
+                    creator.clone(),
+                    arguments.clone(),
+                    cwd.to_path_buf(),
+                    vec![],
+                    CacheControl::Default,
+                    pool.clone(),
+                    pending.increment(),
+                )
+                .await
+        })
+        .unwrap();
         // Ensure that the dependency file was created.
         assert!(fs::metadata(&dep).map(|m| m.len() > 0).unwrap());
         // Ensure that the object file was created.
@@ -4738,23 +4741,22 @@ LLVM version: 6.0",
             CompilerArguments::Ok(h) => h,
             o => panic!("Bad result from parse_arguments: {o:?}"),
         };
-        let (cached, res) = runtime
-            .block_on(async {
-                hasher
-                    .get_cached_or_compile(
-                        &service,
-                        None,
-                        creator,
-                        arguments,
-                        cwd.to_path_buf(),
-                        vec![],
-                        CacheControl::Default,
-                        pool,
-                        pending.increment(),
-                    )
-                    .await
-            })
-            .unwrap();
+        let (cached, res) = crate::util::block_on(&runtime, async {
+            hasher
+                .get_cached_or_compile(
+                    &service,
+                    None,
+                    creator,
+                    arguments,
+                    cwd.to_path_buf(),
+                    vec![],
+                    CacheControl::Default,
+                    pool,
+                    pending.increment(),
+                )
+                .await
+        })
+        .unwrap();
         assert_eq!(cached, CompileResult::Error(Default::default()));
         assert_eq!(1, res.code().or(res.signal()).unwrap());
         // Shouldn't get anything on stdout, since that would just be preprocessor spew!
@@ -4953,12 +4955,6 @@ mod test_dist {
         }
         fn write_tar_gz(&self, _: &mut (dyn Write + Send)) -> Result<()> {
             panic!("ArchivePackager::write_compressed_tar should not have called packager")
-        }
-        async fn build_async(
-            &self,
-            _: &mut (dyn futures::AsyncWrite + Unpin + Send + Sync),
-        ) -> Result<()> {
-            panic!("ArchivePackager::package should not have called build_async")
         }
     }
 

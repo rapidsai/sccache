@@ -44,18 +44,17 @@ impl Jobs {
         &self,
         inputs: I,
     ) -> Option<Vec<String>> {
-        let missing_inputs =
-            futures::future::join_all(inputs.into_iter().map(|digest| async move {
-                if !self.has_job_inputs(digest).await {
-                    Some(digest.to_owned())
-                } else {
-                    None
-                }
-            }))
-            .await
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>();
+        let missing_inputs = crate::util::join_all(inputs.into_iter().map(|digest| async move {
+            if !self.has_job_inputs(digest).await {
+                Some(digest.to_owned())
+            } else {
+                None
+            }
+        }))
+        .await
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
 
         if missing_inputs.is_empty() {
             None

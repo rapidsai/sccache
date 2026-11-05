@@ -25,7 +25,7 @@ use crate::{
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use serde_with::{OneOrMany, formats::PreferMany, serde_as};
-use std::{collections::HashMap, ffi::OsStr, net::SocketAddr, path::Path};
+use std::{collections::HashMap, ffi::OsString, net::SocketAddr, path::Path};
 
 #[serde_as]
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -73,7 +73,13 @@ pub struct Config {
 
 impl Config {
     pub fn load<P: AsRef<Path>, O: Into<Option<P>>>(path: O) -> crate::errors::Result<Self> {
-        Self::from_envs_and_path(std::env::vars_os(), path).map(|mut conf| {
+        Self::load_from_path(path.into().as_ref().map(AsRef::as_ref))
+    }
+
+    // Not generic, so sccache-dist calls this crate's copy of the config loader instead of
+    // compiling its own (release builds don't share generic instances between crates).
+    fn load_from_path(path: Option<&Path>) -> crate::errors::Result<Self> {
+        Self::from_envs_and_path::<_, _, _, &Path>(std::env::vars_os(), path).map(|mut conf| {
             if conf.id.is_empty() {
                 conf.id = defaults::default_scheduler_id();
             }
@@ -82,12 +88,24 @@ impl Config {
     }
 }
 
-impl_add_for_config! { Config }
-
-// Delegate Default to #[serde(default)]
+// Same as the #[serde(default)]s, see `defaults_match_serde_defaults`.
 impl Default for Config {
     fn default() -> Self {
-        serde_json::from_str("{}").unwrap()
+        Self {
+            jobs: Caches::default(),
+            toolchains: Caches::default(),
+            auth: defaults::default_auth(),
+            heartbeat_interval_ms: defaults::default_heartbeat_interval(),
+            job_time_limit_secs: defaults::default_job_time_limit(),
+            keepalive: Keepalive::default(),
+            max_body_size: defaults::default_max_body_size(),
+            max_concurrent_streams: None,
+            message_broker: None,
+            metrics: Metrics::default(),
+            public_addr: defaults::default_public_addr(),
+            id: String::new(),
+            shutdown_timeout_secs: defaults::default_shutdown_timeout(),
+        }
     }
 }
 
@@ -153,11 +171,7 @@ impl Loadable<Self> for Config {
         Some("SCCACHE_DIST")
     }
 
-    fn from_vars<I, S>(vars: I) -> Result<Self>
-    where
-        I: IntoIterator<Item = (S, S)>,
-        S: AsRef<OsStr>,
-    {
+    fn from_var_list(vars: &[(OsString, OsString)]) -> Result<Self> {
         let mut conf = Self::from_vars_impl(vars)?;
 
         // Remove Azure configs that don't have an auth mechanism
@@ -174,11 +188,7 @@ impl Loadable<Self> for Config {
         Ok(conf)
     }
 
-    fn select_vars<Iter, S>(vars: Iter) -> Result<impl IntoIterator<Item = (String, String)>>
-    where
-        Iter: IntoIterator<Item = (S, S)>,
-        S: AsRef<OsStr>,
-    {
+    fn select_vars(vars: &[(OsString, OsString)]) -> Result<Vec<(String, String)>> {
         use crate::util::os_str_to_str;
 
         let prefix_ = Self::env_prefix().map_or_else(
@@ -195,10 +205,10 @@ impl Loadable<Self> for Config {
         let metrics_ = ["DOGSTATSD_", "PROMETHEUS_"];
 
         let vars = vars
-            .into_iter()
+            .iter()
             .map(|(key, val)| -> Result<Vec<(String, String)>> {
-                let key = os_str_to_str(key.as_ref())?;
-                let val = os_str_to_str(val.as_ref())?;
+                let key = os_str_to_str(key.as_os_str())?;
+                let val = os_str_to_str(val.as_os_str())?;
 
                 // Only take vars that start with `SCCACHE_DIST_`
                 let key = if let Some(key) = key.strip_prefix(&prefix_) {
@@ -335,10 +345,16 @@ pub struct JWTDecode {
     pub leeway: u64,
 }
 
-// Delegate Default to #[serde(default)]
+// Same as the #[serde(default)]s, see `defaults_match_serde_defaults`.
 impl Default for JWTDecode {
     fn default() -> Self {
-        serde_json::from_str("{}").unwrap()
+        Self {
+            audience: vec![],
+            issuer: vec![],
+            jwks_url: vec![],
+            claims: HashMap::new(),
+            leeway: defaults::default_jwt_decode_leeway(),
+        }
     }
 }
 
@@ -389,7 +405,82 @@ mod test {
     use super::*;
     use crate::config::{cache::*, dist::*};
 
-    use std::str::FromStr;
+    use std::{path::PathBuf, str::FromStr};
+
+    #[test]
+    fn defaults_match_serde_defaults() -> Result<()> {
+        assert_eq!(Config::default(), serde_json::from_str("{}").unwrap());
+        assert_eq!(JWTDecode::default(), serde_json::from_str("{}").unwrap());
+
+        assert_eq!(
+            Config::from_toml_impl("[jobs]\n[toolchains]\n[keepalive]\n")?,
+            Config::default()
+        );
+
+        let config = Config::from_toml_impl(
+            r#"
+            [message_broker]
+
+            [[client_auth]]
+            type = "jwt"
+            "#,
+        )?;
+        assert_eq!(config.message_broker, Some(MessageBroker::default()));
+        assert_eq!(config.auth, vec![Auth::Jwt(JWTDecode::default())]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn from_envs_and_path_merges_file_and_env() -> Result<()> {
+        drop(env_logger::try_init());
+
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("scheduler.toml");
+        std::fs::write(
+            &path,
+            r#"
+            id = "file-id"
+            job_time_limit_secs = 1200
+
+            [message_broker]
+            addr = "amqp://file:5672//"
+            "#,
+        )?;
+
+        let config = Config::from_envs_and_path(
+            [
+                ("SCCACHE_DIST_SCHEDULER_ID", "env-id"),
+                ("AMQP_ADDR", "amqp://env:5672//"),
+            ],
+            path,
+        )?;
+
+        assert_eq!(config.id, "env-id");
+        assert_eq!(config.job_time_limit_secs, 1200);
+        assert_eq!(config.message_broker, Some("amqp://env:5672//".into()));
+
+        Ok(())
+    }
+
+    #[test]
+    fn load_reads_given_path() -> Result<()> {
+        drop(env_logger::try_init());
+
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("scheduler.toml");
+        std::fs::write(&path, "id = \"file-id\"\njob_time_limit_secs = 1234\n")?;
+
+        // `load` reads the process env too, so compare against a load from the same env
+        let expected = Config::from_envs_and_path(std::env::vars_os(), path.clone())?;
+        assert_eq!(Config::load::<&PathBuf, _>(Some(&path))?, expected);
+        assert_eq!(Config::load(path.clone())?, expected);
+
+        std::fs::write(&path, "")?;
+        assert!(!Config::load(path)?.id.is_empty());
+
+        Ok(())
+    }
 
     #[test]
     fn config_from_vars_amqp_addr() -> Result<()> {

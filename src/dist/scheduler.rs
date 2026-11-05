@@ -202,7 +202,7 @@ impl Scheduler {
             Ok(())
         };
 
-        let heartbeat = tokio::spawn({
+        let heartbeat = crate::util::spawn_detached({
             let this = self.clone();
             async move {
                 loop {
@@ -272,14 +272,14 @@ impl Scheduler {
 
     async fn poll_for_finished_jobs(&self) -> Result<()> {
         let finished_jobs =
-            futures::future::join_all(self.jobs.lock().await.keys().map(|job_id| async {
+            crate::util::join_all(self.jobs.lock().await.keys().map(|job_id| async {
                 (job_id.clone(), self.jobs_io.has_job_result(job_id).await)
             }))
             .await
             .into_iter()
             .filter_map(|(job_id, has_result)| has_result.then_some(job_id));
 
-        futures::future::try_join_all(
+        crate::util::try_join_all(
             finished_jobs.map(|job_id| async move { self.job_finished(&job_id, None).await }),
         )
         .await
@@ -300,7 +300,7 @@ impl Scheduler {
             .map(|s| s.queue.clone())
             .collect::<Vec<_>>();
 
-        futures::future::try_join_all(
+        crate::util::try_join_all(
             std::iter::once(self.tasks.update_status(status.clone(), None)).chain(
                 servers
                     .iter()
@@ -872,6 +872,6 @@ impl RunJob {
 
 impl Drop for RunJob {
     fn drop(&mut self) {
-        tokio::spawn(Self::drop(self.job_idx, self.state.clone()));
+        crate::util::spawn_detached(Self::drop(self.job_idx, self.state.clone()));
     }
 }

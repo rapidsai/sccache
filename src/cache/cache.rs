@@ -1301,7 +1301,7 @@ mod test {
 
         // Test Read Write
         {
-            runtime.block_on(async {
+            crate::util::block_on(&runtime, async {
                 let config = make_config(CacheMode::ReadWrite);
                 let storage = StorageKind::Compilations
                     .create(&config.cache, &[])
@@ -1313,7 +1313,7 @@ mod test {
 
         // Test Read-only
         {
-            runtime.block_on(async {
+            crate::util::block_on(&runtime, async {
                 let config = make_config(CacheMode::ReadOnly);
                 let storage = StorageKind::Compilations
                     .create(&config.cache, &[])
@@ -1363,7 +1363,7 @@ mod test {
 
         let runtime = single_threaded_runtime();
 
-        runtime.block_on(async {
+        crate::util::block_on(&runtime, async {
             StorageKind::Compilations
                 .create(
                     StorageArgs {
@@ -1388,7 +1388,7 @@ mod test {
 
         let runtime = single_threaded_runtime();
 
-        runtime.block_on(async {
+        crate::util::block_on(&runtime, async {
             StorageKind::Compilations
                 .create(
                     StorageArgs {

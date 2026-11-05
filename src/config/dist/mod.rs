@@ -35,10 +35,14 @@ pub struct Keepalive {
     pub timeout: u64,
 }
 
-// Delegate Default to #[serde(default)]
+// Same as the #[serde(default)]s, see `defaults_match_serde_defaults`.
 impl Default for Keepalive {
     fn default() -> Self {
-        serde_json::from_str("{}").unwrap()
+        Self {
+            enabled: defaults::default_true(),
+            interval: defaults::default_keepalive_interval(),
+            timeout: defaults::default_keepalive_timeout(),
+        }
     }
 }
 
@@ -63,9 +67,16 @@ mod dist_server {
         pub retry_delay: u32,
     }
 
+    // Same as the #[serde(default)]s, see `defaults_match_serde_defaults`.
     impl Default for MessageBroker {
         fn default() -> Self {
-            serde_json::from_str("{}").unwrap()
+            Self {
+                addr: String::new(),
+                connection_timeout: defaults::default_broker_connection_timeout(),
+                connection_retry: defaults::default_true(),
+                max_retries: defaults::default_broker_max_retries(),
+                retry_delay: defaults::default_broker_retry_delay(),
+            }
         }
     }
 
@@ -210,5 +221,20 @@ pub mod defaults {
 
     pub fn default_prometheus_push_gateway_interval() -> u64 {
         Duration::from_secs(10).as_secs()
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn defaults_match_serde_defaults() {
+        assert_eq!(Keepalive::default(), serde_json::from_str("{}").unwrap());
+        #[cfg(feature = "dist-server")]
+        assert_eq!(
+            MessageBroker::default(),
+            serde_json::from_str("{}").unwrap()
+        );
     }
 }

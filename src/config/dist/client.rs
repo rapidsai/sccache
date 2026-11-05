@@ -68,10 +68,19 @@ pub struct Config {
     pub toolchain_cache_size: u64,
 }
 
-// Delegate Default to #[serde(default)]
+// Same as the #[serde(default)]s, see `defaults_match_serde_defaults`.
 impl Default for Config {
     fn default() -> Self {
-        serde_json::from_str("{}").unwrap()
+        Self {
+            auth: Auth::default(),
+            cache_dir: defaults::default_dist_cache_dir(),
+            fallback_to_local_compile: defaults::default_true(),
+            max_retries: defaults::default_max_retries(),
+            net: Networking::default(),
+            url: None,
+            toolchains: vec![],
+            toolchain_cache_size: defaults::default_disk_cache_size(),
+        }
     }
 }
 
@@ -198,5 +207,15 @@ pub mod defaults {
 
     pub fn default_max_retries() -> MaxRetries {
         MaxRetries::Count(0)
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn defaults_match_serde_defaults() {
+        assert_eq!(Config::default(), serde_json::from_str("{}").unwrap());
     }
 }

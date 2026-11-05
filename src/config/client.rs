@@ -103,10 +103,16 @@ impl Config {
 
 impl_add_for_config! { Config }
 
-// Delegate Default to #[serde(default)]
+// Same as the #[serde(default)]s, see `defaults_match_serde_defaults`.
 impl Default for Config {
     fn default() -> Self {
-        serde_json::from_str("{}").unwrap()
+        Self {
+            cache: Caches::default(),
+            basedirs: Basedirs::default(),
+            dist: dist::Config::default(),
+            server_startup_timeout_ms: defaults::default_server_startup_timeout(),
+            client_side_mode: false,
+        }
     }
 }
 
@@ -155,11 +161,7 @@ impl Loadable<Self> for Config {
         Some("SCCACHE")
     }
 
-    fn from_vars<I, S>(vars: I) -> Result<Self>
-    where
-        I: IntoIterator<Item = (S, S)>,
-        S: AsRef<OsStr>,
-    {
+    fn from_var_list(vars: &[(OsString, OsString)]) -> Result<Self> {
         let mut conf = Self::from_vars_impl(vars)?;
 
         // Remove Azure configs that don't have an auth mechanism
@@ -182,11 +184,7 @@ impl Loadable<Self> for Config {
         Ok(conf)
     }
 
-    fn select_vars<Iter, S>(vars: Iter) -> Result<impl IntoIterator<Item = (String, String)>>
-    where
-        Iter: IntoIterator<Item = (S, S)>,
-        S: AsRef<OsStr>,
-    {
+    fn select_vars(vars: &[(OsString, OsString)]) -> Result<Vec<(String, String)>> {
         use crate::util::os_str_to_str;
 
         // Rewrite env vars to match this struct:
@@ -224,10 +222,10 @@ impl Loadable<Self> for Config {
         ];
 
         let vars = vars
-            .into_iter()
+            .iter()
             .map(|(key, val)| -> Result<Vec<(String, String)>> {
-                let key = os_str_to_str(key.as_ref())?;
-                let val = os_str_to_str(val.as_ref())?;
+                let key = os_str_to_str(key.as_os_str())?;
+                let val = os_str_to_str(val.as_os_str())?;
 
                 // Only take vars that start with `SCCACHE_`
                 let key = if let Some(key) = key.strip_prefix(&prefix_) {
@@ -653,6 +651,22 @@ mod test {
     use std::{collections::BTreeMap, ffi::OsString};
     #[cfg(any(feature = "dist-client", feature = "dist-server"))]
     use {crate::config::utils::HTTPUrl, std::str::FromStr};
+
+    #[test]
+    fn defaults_match_serde_defaults() -> Result<()> {
+        assert_eq!(Config::default(), serde_json::from_str("{}").unwrap());
+
+        assert_eq!(
+            Config::from_json_impl(r#"{"cache": {}, "dist": {"net": {"keepalive": {}}}}"#)?,
+            Config::default()
+        );
+        assert_eq!(
+            Config::from_toml_impl("[cache.disk]")?.cache.configs["disk"],
+            Cache::Disk(Disk::default())
+        );
+
+        Ok(())
+    }
 
     #[test]
     fn config_from_vars() -> Result<()> {
@@ -1092,6 +1106,70 @@ mod test {
     }
 
     #[test]
+    fn config_from_json() -> Result<()> {
+        drop(env_logger::try_init());
+
+        let config = Config::from_json(
+            r#"{
+                "server_startup_timeout_ms": 5000,
+                "cache": {
+                    "read_timeout": 100,
+                    "disk": {"dir": "/tmp/.cache/sccache", "size": "7G"},
+                    "custom": {"type": "redis", "endpoint": "redis://127.0.0.1:6379", "ttl": 3600},
+                    "multilevel": {"chain": "disk, custom"}
+                },
+                "dist": {
+                    "scheduler_url": "http://1.2.3.4:10600",
+                    "auth": {"type": "token", "token": "secrettoken"}
+                }
+            }"#,
+        )?;
+
+        let mut cache: Caches = vec![
+            Disk {
+                dir: "/tmp/.cache/sccache".into(),
+                size: 7 * 1024 * 1024 * 1024,
+                ..Default::default()
+            }
+            .into(),
+        ]
+        .into();
+        cache.configs.insert(
+            "custom".into(),
+            Redis {
+                endpoint: Some("redis://127.0.0.1:6379".into()),
+                url: None,
+                ttl: 3600,
+                ..Redis::from_url("")
+            }
+            .into(),
+        );
+        cache.multilevel.chain = Some(vec!["disk".into(), "custom".into()]);
+        cache.read_timeout_secs = 100;
+
+        assert_eq!(
+            config,
+            Config {
+                cache,
+                dist: dist::Config {
+                    auth: dist::Auth::Token {
+                        token: "secrettoken".into()
+                    },
+                    #[cfg(any(feature = "dist-client", feature = "dist-server"))]
+                    url: Some(HTTPUrl::from_str("http://1.2.3.4:10600")?),
+                    #[cfg(not(any(feature = "dist-client", feature = "dist-server")))]
+                    url: Some("http://1.2.3.4:10600".into()),
+                    ..Default::default()
+                },
+                server_startup_timeout_ms: 5000,
+                ..Default::default()
+            }
+        );
+
+        Ok(())
+    }
+
+    #[test]
     fn config_from_vars_aliases() -> Result<()> {
         drop(env_logger::try_init());
 
@@ -1403,6 +1481,147 @@ mod test {
     }
 
     #[test]
+    fn config_file_from_path_or_sccache_conf() -> Result<()> {
+        drop(env_logger::try_init());
+
+        let dir = tempfile::tempdir()?;
+        let conf_path = dir.path().join("conf.toml");
+        let explicit_path = dir.path().join("explicit.toml");
+        std::fs::write(&conf_path, "[cache.disk]\nsize = 1024\n")?;
+        std::fs::write(&explicit_path, "[cache.disk]\nsize = 2048\n")?;
+
+        let load = |vars: &[(&OsStr, &OsStr)], path: Option<&PathBuf>| {
+            Config::from_envs_and_path::<_, _, _, &PathBuf>(vars.iter().copied(), path)
+                .map(|config| config.cache.configs["disk"].clone())
+        };
+        let disk = |size| -> Cache {
+            Disk {
+                size,
+                ..Default::default()
+            }
+            .into()
+        };
+        let sccache_conf = (OsStr::new("SCCACHE_CONF"), conf_path.as_os_str());
+        let cache_size = (OsStr::new("SCCACHE_CACHE_SIZE"), OsStr::new("1G"));
+
+        assert_eq!(load(&[sccache_conf], None)?, disk(1024));
+        assert_eq!(load(&[sccache_conf, cache_size], None)?, disk(1 << 30));
+        assert_eq!(load(&[sccache_conf], Some(&explicit_path))?, disk(2048));
+        // A path that can't be opened falls back to SCCACHE_CONF
+        let missing_path = dir.path().join("missing.toml");
+        assert_eq!(load(&[sccache_conf], Some(&missing_path))?, disk(1024));
+
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn non_utf8_env_var_fails() {
+        use std::os::unix::ffi::OsStrExt;
+
+        // Even when the variable isn't one of sccache's
+        assert!(
+            Config::from_vars([
+                (OsStr::new("SCCACHE_CACHE_SIZE"), OsStr::new("1G")),
+                (OsStr::new("UNRELATED"), OsStr::from_bytes(b"\xff")),
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn merge_switches_tagged_variant() -> Result<()> {
+        drop(env_logger::try_init());
+
+        let file_conf = Config::from_toml(
+            r#"
+            [dist.auth]
+            type = "oauth2_code_grant_pkce"
+            client_id = "file_client_id"
+            auth_url = "file_auth_url"
+            token_url = "file_token_url"
+            "#,
+        )?;
+
+        let env_conf = Config::from_vars([
+            ("SCCACHE_DIST_AUTH_TYPE", "oauth2_implicit"),
+            ("SCCACHE_DIST_AUTH_CLIENT_ID", "env_client_id"),
+            ("SCCACHE_DIST_AUTH_AUTH_URL", "env_auth_url"),
+        ])?;
+
+        assert_eq!(
+            (file_conf + env_conf)?.dist.auth,
+            dist::Auth::Oauth2Implicit {
+                client_id: "env_client_id".into(),
+                auth_url: "env_auth_url".into(),
+            }
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn merge_env_equal_to_default_keeps_file_value() -> Result<()> {
+        drop(env_logger::try_init());
+
+        let file_conf = Config::from_toml("server_startup_timeout_ms = 5000")?;
+        // The merge only applies what differs from Default, and 10000 is the default
+        let env_conf = Config::from_vars([("SCCACHE_SERVER_STARTUP_TIMEOUT_MS", "10000")])?;
+
+        assert_eq!((file_conf + env_conf)?.server_startup_timeout_ms, 5000);
+
+        Ok(())
+    }
+
+    #[test]
+    fn merge_chain_error_names_env_var() -> Result<()> {
+        drop(env_logger::try_init());
+
+        let file_conf = Config::from_toml(
+            r#"
+            [cache.custom]
+            type = "redis"
+            endpoint = "redis://127.0.0.1:6379"
+            "#,
+        )?;
+        let env_conf = Config::from_vars([("SCCACHE_CACHE_MULTILEVEL_CHAIN", "nope")])?;
+
+        let err = (file_conf + env_conf).unwrap_err().to_string();
+        assert!(
+            err.contains(
+                r#"'nope' cache not configured, but specified in SCCACHE_CACHE_MULTILEVEL_CHAIN: ["nope"]"#
+            ),
+            "{err}"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn merge_fails_on_conflicting_cache_types() -> Result<()> {
+        drop(env_logger::try_init());
+
+        let file_conf = Config::from_toml(
+            r#"
+            [cache.custom]
+            type = "redis"
+            endpoint = "redis://127.0.0.1:6379"
+            "#,
+        )?;
+        let env_conf = Config::from_vars([
+            ("SCCACHE_CACHE_CUSTOM_TYPE", "s3"),
+            ("SCCACHE_CACHE_CUSTOM_BUCKET", "bucket"),
+        ])?;
+
+        // The merge patches the env's S3 fields over the file's Redis fields, and S3 rejects
+        // the leftovers
+        let err = (file_conf + env_conf).unwrap_err().to_string();
+        assert!(err.contains("unknown field `cluster_endpoints`"), "{err}");
+
+        Ok(())
+    }
+
+    #[test]
     fn skip_cache_check_from_env() -> Result<()> {
         drop(env_logger::try_init());
 
@@ -1431,6 +1650,39 @@ mod test {
                 .to_string(),
             // "SCCACHE_SKIP_CACHE_CHECK must be 'true', 'on', '1', 'false', 'off' or '0'."
             "SCCACHE_CACHE_SKIP_CHECK: invalid value: 'invalid', expected 'true', 'on', '1', 'false', 'off' or '0'"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn numeric_bools_from_env() -> Result<()> {
+        drop(env_logger::try_init());
+
+        // serde_env passes "1" and "0" on as integers, also inside the tagged `Cache` enum
+        let config = Config::from_vars([
+            ("SCCACHE_BUCKET", "bucket"),
+            ("SCCACHE_S3_USE_SSL", "1"),
+            ("SCCACHE_CACHE_CUSTOM_TYPE", "s3"),
+            ("SCCACHE_CACHE_CUSTOM_BUCKET", "custom"),
+            ("SCCACHE_CACHE_CUSTOM_USE_SSL", "0"),
+        ])?;
+
+        assert_eq!(
+            config.cache.configs["s3"],
+            S3 {
+                use_ssl: Some(true),
+                ..S3::from_bucket("bucket")
+            }
+            .into()
+        );
+        assert_eq!(
+            config.cache.configs["custom"],
+            S3 {
+                use_ssl: Some(false),
+                ..S3::from_bucket("custom")
+            }
+            .into()
         );
 
         Ok(())

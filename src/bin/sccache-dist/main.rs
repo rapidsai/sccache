@@ -77,10 +77,11 @@ fn main() {
 fn run(command: Command) -> Result<()> {
     let num_cpus = sccache::util::num_cpus();
 
-    tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?
-        .block_on(async move {
+    sccache::util::block_on(
+        &tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?,
+        async move {
             match command {
                 Command::Scheduler(config::dist::scheduler::Config {
                     auth: client_auth,
@@ -141,10 +142,12 @@ fn run(command: Command) -> Result<()> {
 
                     // Create ClientAuthCheck and bail on Err before registering with Celery
                     if client_auth.is_empty() {
-                        bail!("Scheduler must be configured to use at least one client authentication mechanism");
+                        bail!(
+                            "Scheduler must be configured to use at least one client authentication mechanism"
+                        );
                     }
 
-                    let client_auth_check = futures::future::try_join_all(
+                    let client_auth_check = sccache::util::try_join_all(
                         client_auth.into_iter().map(new_client_auth_check),
                     )
                     .await?;
@@ -179,7 +182,7 @@ fn run(command: Command) -> Result<()> {
                             handle,
                             server,
                             Duration::from_millis(heartbeat_interval_ms),
-                            Duration::from_secs(shutdown_timeout_secs)
+                            Duration::from_secs(shutdown_timeout_secs),
                         )
                         .await
                         .inspect_err(|e| tracing::error!("Server shutdown with error: {e:#}"))
@@ -289,7 +292,8 @@ fn run(command: Command) -> Result<()> {
                         .inspect_err(|e| tracing::error!("Server shutdown with error: {e:#}"))
                 }
             }
-        })
+        },
+    )
 }
 
 async fn init_builder(

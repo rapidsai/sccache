@@ -175,14 +175,13 @@ where
     let pool = pool.clone();
 
     let header = tempdir.path().join("test.h");
-    let tempdir = pool
-        .spawn_blocking(move || {
-            let mut file = File::create(&header)?;
-            file.write_all(b"/* empty */\n")?;
-            Ok::<_, std::io::Error>(tempdir)
-        })
-        .await?
-        .context("Failed to write temporary file")?;
+    let tempdir = crate::util::spawn_blocking_on(&pool, move || {
+        let mut file = File::create(&header)?;
+        file.write_all(b"/* empty */\n")?;
+        Ok::<_, std::io::Error>(tempdir)
+    })
+    .await?
+    .context("Failed to write temporary file")?;
 
     let mut cmd = creator.new_command_sync(&exe);
     // clang.exe on Windows reports the same set of built-in preprocessor defines as clang-cl,
@@ -1222,7 +1221,7 @@ async fn write_clang_dependencies_file(
     dep_path: &Path,
     dependencies: &[PathBuf],
 ) -> Result<()> {
-    let mut f = tokio::io::BufWriter::new(tokio::fs::File::create(dep_path).await?);
+    let mut f = tokio::io::BufWriter::new(crate::util::async_fs::create(dep_path).await?);
 
     let src_path_bs = path_to_bytes(src_path)
         .with_context(|| format!("Couldn't encode input filename: {src_path:?}"))?;

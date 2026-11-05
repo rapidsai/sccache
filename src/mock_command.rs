@@ -1046,7 +1046,7 @@ mod test {
         if share {
             cmd.share_jobserver();
         }
-        runtime.block_on(async {
+        crate::util::block_on(&runtime, async {
             let output = crate::util::run_input_output(cmd, None).await?;
             Ok(!output.stdout.is_empty())
         })

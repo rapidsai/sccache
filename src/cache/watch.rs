@@ -110,7 +110,7 @@ impl WatchStorage {
             debouncer.watch(dir, RecursiveMode::NonRecursive)?;
         }
 
-        tokio::spawn(async move {
+        crate::util::spawn_detached(async move {
             use itertools::Itertools;
             use notify_debouncer_full::notify::{
                 EventKind,

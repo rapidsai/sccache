@@ -19,12 +19,7 @@ use crate::{
 use itertools::Itertools;
 use serde::{Deserialize, Serialize, de};
 use serde_with::{PickFirst, StringWithSeparator, formats::CommaSeparator, serde_as};
-use std::{
-    collections::{BTreeMap, HashSet},
-    fmt,
-    path::PathBuf,
-    str::FromStr,
-};
+use std::{collections::BTreeMap, fmt, path::PathBuf, str::FromStr};
 
 #[derive(Clone, Debug, Serialize, Eq, PartialEq)]
 pub struct Caches {
@@ -72,11 +67,21 @@ impl From<Vec<(&'static str, Cache)>> for Caches {
     }
 }
 
-// Delegate Default to #[serde(default)]
+// Same as deserializing an empty map (see `defaults_match_serde_defaults`). Not written
+// as `serde_json::from_str("{}")` because that compiles one more deserializer for every
+// config type reachable from here.
 impl Default for Caches {
     fn default() -> Self {
-        serde_json::from_str("{}").unwrap()
+        CachesFields::default().finish()
     }
+}
+
+// serde_env also yields the leading segments of multi-word keys (`key` for `key_prefix`) as
+// keys of their own. The hand-written visitors skip keys that start with one of those.
+fn is_env_subkey(name: &str, fields: &[&str]) -> bool {
+    fields
+        .iter()
+        .any(|field| name.starts_with(field.split_once('_').map_or(*field, |(head, _)| head)))
 }
 
 impl<'de> Deserialize<'de> for Caches {
@@ -101,77 +106,38 @@ impl<'de> de::Visitor<'de> for CachesVisitor {
     where
         M: de::MapAccess<'de>,
     {
-        let mut multilevel = None;
-        let mut read_timeout = None;
-        let mut write_timeout = None;
-        let mut skip_check = None;
-        let mut rate_limit = None;
-
-        let to_ignore = [
-            "configs",
-            "multilevel",
-            "read_timeout_secs",
-            "write_timeout_secs",
-            "skip_check",
-            "rate_limit",
-        ]
-        .into_iter()
-        .map(|name| name.split_once('_').map(|(p, _)| p).unwrap_or(name))
-        .chain([
-            "disk_",
-            "s3_",
-            "redis_",
-            "memcached_",
-            "gcs_",
-            "gha_",
-            "azure_",
-            "webdav_",
-            "oss_",
-            "cos_",
-        ])
-        .collect::<HashSet<_>>();
-
-        let mut configs = BTreeMap::<String, Cache>::new();
+        let mut f = CachesFields::default();
 
         while let Ok(Some(name)) = map.next_key::<String>() {
             match name.as_str() {
                 // Expected fields
                 "configs" => {
                     for (name, config) in map.next_value::<BTreeMap<String, Cache>>()? {
-                        configs.insert(name, config);
+                        f.configs.insert(name, config);
                     }
                 }
                 "multilevel" => {
-                    multilevel = map
-                        .next_value::<Option<MultiLevel>>()?
-                        .map(|mut multilevel| {
-                            if let Some(chain) = multilevel.chain.as_mut() {
-                                for level in chain.iter_mut() {
-                                    *level = level.trim().into();
-                                }
-                            }
-                            multilevel
-                        });
+                    f.multilevel = map.next_value::<Option<MultiLevel>>()?.map(trim_chain);
                 }
                 "read_timeout_secs" => {
-                    read_timeout = Some(map.next_value()?);
+                    f.read_timeout = Some(map.next_value()?);
                 }
                 // Infallible alias for read_timeout_secs
                 "read_timeout" => {
-                    read_timeout = map.next_value().ok().or(read_timeout);
+                    f.read_timeout = map.next_value().ok().or(f.read_timeout);
                 }
                 "write_timeout_secs" => {
-                    write_timeout = map.next_value()?;
+                    f.write_timeout = map.next_value()?;
                 }
                 // Infallible alias for write_timeout_secs
                 "write_timeout" => {
-                    write_timeout = map.next_value().ok().or(write_timeout);
+                    f.write_timeout = map.next_value().ok().or(f.write_timeout);
                 }
                 "skip_check" => {
-                    skip_check = Some(map.next_value::<DeserializeBool>()?.into());
+                    f.skip_check = Some(map.next_value::<DeserializeBool>()?.into());
                 }
                 "rate_limit" => {
-                    rate_limit = map.next_value()?;
+                    f.rate_limit = map.next_value()?;
                 }
                 // Legacy: Before supporting multiple configs for the same
                 // storage backend, the type was denoted by field name, i.e.
@@ -207,61 +173,125 @@ impl<'de> de::Visitor<'de> for CachesVisitor {
                 // assume any caches whose key is the CacheType enum tag are
                 // still that storage type.
                 "disk" => {
-                    configs.insert(name, map.next_value::<Disk>()?.into());
+                    f.configs.insert(name, map.next_value::<Disk>()?.into());
                 }
                 "s3" => {
-                    configs.insert(name, map.next_value::<S3>()?.into());
+                    f.configs.insert(name, map.next_value::<S3>()?.into());
                 }
                 "redis" => {
-                    configs.insert(name, map.next_value::<Redis>()?.into());
+                    f.configs.insert(name, map.next_value::<Redis>()?.into());
                 }
                 "memcached" => {
-                    configs.insert(name, map.next_value::<Memcached>()?.into());
+                    f.configs
+                        .insert(name, map.next_value::<Memcached>()?.into());
                 }
                 "gcs" => {
-                    configs.insert(name, map.next_value::<GCS>()?.into());
+                    f.configs.insert(name, map.next_value::<GCS>()?.into());
                 }
                 "gha" => {
-                    configs.insert(name, map.next_value::<GHA>()?.into());
+                    f.configs.insert(name, map.next_value::<GHA>()?.into());
                 }
                 "azure" => {
-                    configs.insert(name, map.next_value::<Azure>()?.into());
+                    f.configs.insert(name, map.next_value::<Azure>()?.into());
                 }
                 "webdav" => {
-                    configs.insert(name, map.next_value::<Webdav>()?.into());
+                    f.configs.insert(name, map.next_value::<Webdav>()?.into());
                 }
                 "oss" => {
-                    configs.insert(name, map.next_value::<OSS>()?.into());
+                    f.configs.insert(name, map.next_value::<OSS>()?.into());
                 }
                 "cos" => {
-                    configs.insert(name, map.next_value::<COS>()?.into());
+                    f.configs.insert(name, map.next_value::<COS>()?.into());
                 }
                 // New format: a named Cache enum
                 _ => {
                     // Skip serde_env sub-selections for fields we've already deserialized
-                    if to_ignore.iter().any(|prefix| name.starts_with(prefix)) {
+                    if is_caches_env_subkey(&name) {
                         let _ = map.next_value::<_Ignored>();
                     } else if let Ok(config) = map.next_value::<Cache>() {
-                        configs.insert(name, config);
+                        f.configs.insert(name, config);
                     }
                 }
             }
         }
+
+        Ok(f.finish())
+    }
+}
+
+// Collects the fields so that building the config happens in non-generic code, instead of
+// being compiled again for every deserializer.
+#[derive(Default)]
+struct CachesFields {
+    configs: BTreeMap<String, Cache>,
+    multilevel: Option<MultiLevel>,
+    read_timeout: Option<u64>,
+    write_timeout: Option<u64>,
+    skip_check: Option<bool>,
+    rate_limit: Option<RateLimits>,
+}
+
+impl CachesFields {
+    fn finish(self) -> Caches {
+        let CachesFields {
+            configs,
+            multilevel,
+            read_timeout,
+            write_timeout,
+            skip_check,
+            rate_limit,
+        } = self;
 
         let mut multilevel = multilevel.unwrap_or_default();
         multilevel.chain = multilevel
             .chain
             .or_else(|| Some(MultiLevel::chain_from_configs(&configs)));
 
-        Ok(Caches {
+        Caches {
             configs,
             multilevel,
             read_timeout_secs: read_timeout.unwrap_or_else(defaults::default_read_timeout),
             write_timeout_secs: write_timeout,
             skip_check: skip_check.unwrap_or_default(),
             rate_limit: rate_limit.unwrap_or_default(),
-        })
+        }
     }
+}
+
+fn trim_chain(mut multilevel: MultiLevel) -> MultiLevel {
+    if let Some(chain) = multilevel.chain.as_mut() {
+        for level in chain.iter_mut() {
+            *level = level.trim().into();
+        }
+    }
+    multilevel
+}
+
+fn is_caches_env_subkey(name: &str) -> bool {
+    is_env_subkey(
+        name,
+        &[
+            "configs",
+            "multilevel",
+            "read_timeout_secs",
+            "write_timeout_secs",
+            "skip_check",
+            "rate_limit",
+        ],
+    ) || [
+        "disk_",
+        "s3_",
+        "redis_",
+        "memcached_",
+        "gcs_",
+        "gha_",
+        "azure_",
+        "webdav_",
+        "oss_",
+        "cos_",
+    ]
+    .iter()
+    .any(|prefix| name.starts_with(prefix))
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
@@ -502,65 +532,55 @@ impl<'de> de::Visitor<'de> for AzureVisitor {
     where
         M: de::MapAccess<'de>,
     {
-        let mut auth = None;
-        let mut enabled = None;
-        let mut endpoint = None;
-        let mut shared_key = None;
-        let mut storage_account = None;
-
-        let mut container = None;
-        let mut key_prefix = None;
-        let mut rw_mode = None;
-
-        let to_ignore = [
-            "preprocessor",
-            "enabled",
-            "container",
-            "key_prefix",
-            "rw_mode",
-            "auth",
-            "connection_string",
-            "storage_account",
-            "endpoint",
-        ]
-        .into_iter()
-        .map(|name| name.split_once('_').map(|(p, _)| p).unwrap_or(name))
-        .collect::<HashSet<_>>();
+        let mut f = AzureFields::default();
 
         while let Ok(Some(name)) = map.next_key::<String>() {
             match name.as_str() {
                 "auth" => {
-                    auth = Some(map.next_value()?);
+                    f.auth = Some(map.next_value()?);
                 }
                 "enabled" => {
-                    enabled = map.next_value::<DeserializeBool>()?.into();
+                    f.enabled = map.next_value::<DeserializeBool>()?.into();
                 }
                 "container" => {
-                    container = Some(map.next_value::<String>()?);
+                    f.container = Some(map.next_value::<String>()?);
                 }
                 "key_prefix" => {
-                    key_prefix = Some(map.next_value::<String>()?);
+                    f.key_prefix = Some(map.next_value::<String>()?);
                 }
                 "rw_mode" => {
-                    rw_mode = Some(map.next_value()?);
+                    f.rw_mode = Some(map.next_value()?);
                 }
                 "connection_string" => {
-                    shared_key = Some(AzureAuth::SharedKey {
+                    f.shared_key = Some(AzureAuth::SharedKey {
                         connection_string: map.next_value()?,
                     });
                 }
                 "endpoint" => {
-                    endpoint = Some(AzureAuth::Endpoint {
+                    f.endpoint = Some(AzureAuth::Endpoint {
                         endpoint: map.next_value()?,
                     });
                 }
                 "storage_account" => {
-                    storage_account = Some(AzureAuth::StorageAccount {
+                    f.storage_account = Some(AzureAuth::StorageAccount {
                         storage_account: map.next_value()?,
                     });
                 }
                 name => {
-                    if to_ignore.iter().any(|prefix| name.starts_with(prefix)) {
+                    if is_env_subkey(
+                        name,
+                        &[
+                            "preprocessor",
+                            "enabled",
+                            "container",
+                            "key_prefix",
+                            "rw_mode",
+                            "auth",
+                            "connection_string",
+                            "storage_account",
+                            "endpoint",
+                        ],
+                    ) {
                         let _ = map.next_value::<_Ignored>();
                     } else {
                         return Err(de::Error::unknown_field(
@@ -579,6 +599,35 @@ impl<'de> de::Visitor<'de> for AzureVisitor {
                 }
             }
         }
+
+        Ok(f.finish())
+    }
+}
+
+#[derive(Default)]
+struct AzureFields {
+    auth: Option<AzureAuth>,
+    enabled: Option<bool>,
+    endpoint: Option<AzureAuth>,
+    shared_key: Option<AzureAuth>,
+    storage_account: Option<AzureAuth>,
+    container: Option<String>,
+    key_prefix: Option<String>,
+    rw_mode: Option<CacheMode>,
+}
+
+impl AzureFields {
+    fn finish(self) -> Azure {
+        let AzureFields {
+            auth,
+            enabled,
+            endpoint,
+            shared_key,
+            storage_account,
+            container,
+            key_prefix,
+            rw_mode,
+        } = self;
 
         let mut enabled = enabled.unwrap_or(true);
 
@@ -629,13 +678,13 @@ impl<'de> de::Visitor<'de> for AzureVisitor {
             warn!("Azure storage disabled, see above messages.");
         }
 
-        Ok(Azure {
+        Azure {
             enabled,
             container,
             auth,
             key_prefix: key_prefix.unwrap_or_default(),
             rw_mode: rw_mode.unwrap_or_default(),
-        })
+        }
     }
 }
 
@@ -677,9 +726,16 @@ pub struct Disk {
     pub rw_mode: CacheMode,
 }
 
+// Same as the #[serde(default)]s, see `defaults_match_serde_defaults`.
 impl Default for Disk {
     fn default() -> Self {
-        serde_json::from_str("{}").unwrap()
+        Self {
+            enabled: defaults::default_true(),
+            dir: defaults::default_disk_cache_dir(),
+            key_prefix: String::new(),
+            size: defaults::default_disk_cache_size(),
+            rw_mode: CacheMode::default(),
+        }
     }
 }
 
@@ -739,60 +795,51 @@ impl<'de> de::Visitor<'de> for GCSVisitor {
     where
         M: de::MapAccess<'de>,
     {
-        let mut enabled = None;
-        let mut bucket = None;
-        let mut key_prefix = None;
-        let mut key_path = None;
-        let mut oauth_url = None;
-        let mut service_account = None;
-        let mut credentials_url = None;
-        let mut rw_mode = None;
-
-        let to_ignore = [
-            "preprocessor",
-            "enabled",
-            "bucket",
-            "key_prefix",
-            "cred_path",
-            "key_path",
-            "oauth_url",
-            "service_account",
-            "credential_url",
-            "credentials_url",
-            "rw_mode",
-        ]
-        .into_iter()
-        .map(|name| name.split_once('_').map(|(p, _)| p).unwrap_or(name))
-        .collect::<HashSet<_>>();
+        let mut f = GCSFields::default();
 
         while let Ok(Some(name)) = map.next_key::<String>() {
             match name.as_str() {
                 "enabled" => {
-                    enabled = map.next_value::<DeserializeBool>()?.into();
+                    f.enabled = map.next_value::<DeserializeBool>()?.into();
                 }
                 "bucket" => {
-                    bucket = Some(map.next_value()?);
+                    f.bucket = Some(map.next_value()?);
                 }
                 "key_prefix" => {
-                    key_prefix = Some(map.next_value()?);
+                    f.key_prefix = Some(map.next_value()?);
                 }
                 "cred_path" | "key_path" => {
-                    key_path = map.next_value()?;
+                    f.key_path = map.next_value()?;
                 }
                 "oauth_url" => {
-                    oauth_url = Some(map.next_value::<String>()?);
+                    f.oauth_url = Some(map.next_value::<String>()?);
                 }
                 "service_account" => {
-                    service_account = map.next_value()?;
+                    f.service_account = map.next_value()?;
                 }
                 "credentials_url" | "credential_url" => {
-                    credentials_url = map.next_value()?;
+                    f.credentials_url = map.next_value()?;
                 }
                 "rw_mode" => {
-                    rw_mode = Some(map.next_value()?);
+                    f.rw_mode = Some(map.next_value()?);
                 }
                 name => {
-                    if to_ignore.iter().any(|prefix| name.starts_with(prefix)) {
+                    if is_env_subkey(
+                        name,
+                        &[
+                            "preprocessor",
+                            "enabled",
+                            "bucket",
+                            "key_prefix",
+                            "cred_path",
+                            "key_path",
+                            "oauth_url",
+                            "service_account",
+                            "credential_url",
+                            "credentials_url",
+                            "rw_mode",
+                        ],
+                    ) {
                         let _ = map.next_value::<_Ignored>();
                     } else {
                         return Err(de::Error::unknown_field(
@@ -811,6 +858,35 @@ impl<'de> de::Visitor<'de> for GCSVisitor {
             }
         }
 
+        Ok(f.finish())
+    }
+}
+
+#[derive(Default)]
+struct GCSFields {
+    enabled: Option<bool>,
+    bucket: Option<String>,
+    key_prefix: Option<String>,
+    key_path: Option<String>,
+    oauth_url: Option<String>,
+    service_account: Option<String>,
+    credentials_url: Option<String>,
+    rw_mode: Option<CacheMode>,
+}
+
+impl GCSFields {
+    fn finish(self) -> GCS {
+        let GCSFields {
+            enabled,
+            bucket,
+            key_prefix,
+            key_path,
+            oauth_url,
+            service_account,
+            credentials_url,
+            rw_mode,
+        } = self;
+
         let mut enabled = enabled.unwrap_or(true);
 
         if oauth_url.is_some() {
@@ -828,7 +904,7 @@ impl<'de> de::Visitor<'de> for GCSVisitor {
             warn!("GCS storage disabled, see above messages.");
         }
 
-        Ok(GCS {
+        GCS {
             enabled,
             bucket: bucket.unwrap_or_default(),
             key_prefix: key_prefix.unwrap_or_default(),
@@ -836,7 +912,7 @@ impl<'de> de::Visitor<'de> for GCSVisitor {
             service_account,
             credentials_url,
             rw_mode: rw_mode.unwrap_or_default(),
-        })
+        }
     }
 }
 
@@ -1060,79 +1136,66 @@ impl<'de> de::Visitor<'de> for S3Visitor {
     where
         M: de::MapAccess<'de>,
     {
-        let mut enabled = None;
-        let mut bucket = None;
-        let mut region = None;
-        let mut key_prefix = None;
-        let mut no_credentials = None;
-        let mut endpoint = None;
-        let mut use_ssl = None;
-        let mut server_side_encryption = None;
-        let mut server_side_encryption_aws_kms = None;
-        let mut server_side_encryption_kms_key_id = None;
-        let mut enable_virtual_host_style = None;
-        let mut rw_mode = None;
-
-        let to_ignore = [
-            "preprocessor",
-            "enabled",
-            "bucket",
-            "region",
-            "key_prefix",
-            "no_credentials",
-            "endpoint",
-            "use_ssl",
-            "server_side_encryption",
-            "server_side_encryption_aws_kms",
-            "server_side_encryption_kms_key_id",
-            "enable_virtual_host_style",
-            "rw_mode",
-        ]
-        .into_iter()
-        .map(|name| name.split_once('_').map(|(p, _)| p).unwrap_or(name))
-        .collect::<HashSet<_>>();
+        let mut f = S3Fields::default();
 
         while let Ok(Some(name)) = map.next_key::<String>() {
             match name.as_str() {
                 "enabled" => {
-                    enabled = map.next_value::<DeserializeBool>()?.into();
+                    f.enabled = map.next_value::<DeserializeBool>()?.into();
                 }
                 "bucket" => {
-                    bucket = Some(map.next_value::<String>()?);
+                    f.bucket = Some(map.next_value::<String>()?);
                 }
                 "region" => {
-                    region = map.next_value::<Option<String>>()?;
+                    f.region = map.next_value::<Option<String>>()?;
                 }
                 "key_prefix" => {
-                    key_prefix = Some(map.next_value::<String>()?);
+                    f.key_prefix = Some(map.next_value::<String>()?);
                 }
                 "no_credentials" => {
-                    no_credentials = map.next_value::<DeserializeBool>()?.into();
+                    f.no_credentials = map.next_value::<DeserializeBool>()?.into();
                 }
                 "enable_virtual_host_style" => {
-                    enable_virtual_host_style = map.next_value::<DeserializeBool>()?.into();
+                    f.enable_virtual_host_style = map.next_value::<DeserializeBool>()?.into();
                 }
                 "endpoint" => {
-                    endpoint = map.next_value::<Option<String>>()?;
+                    f.endpoint = map.next_value::<Option<String>>()?;
                 }
                 "use_ssl" => {
-                    use_ssl = map.next_value::<DeserializeBool>()?.into();
+                    f.use_ssl = map.next_value::<DeserializeBool>()?.into();
                 }
                 "server_side_encryption" => {
-                    server_side_encryption =
+                    f.server_side_encryption =
                         map.next_value::<DeserializeBool>().ok().map(Into::into);
                 }
                 "server_side_encryption_aws_kms" => {
-                    server_side_encryption_aws_kms = map.next_value::<DeserializeBool>()?.into();
+                    f.server_side_encryption_aws_kms = map.next_value::<DeserializeBool>()?.into();
                 }
                 "server_side_encryption_kms_key_id" => {
-                    server_side_encryption_kms_key_id = map.next_value::<Option<String>>()?;
+                    f.server_side_encryption_kms_key_id = map.next_value::<Option<String>>()?;
                 }
                 "rw_mode" => {
-                    rw_mode = Some(map.next_value()?);
+                    f.rw_mode = Some(map.next_value()?);
                 }
                 name => {
-                    if to_ignore.iter().any(|prefix| name.starts_with(prefix)) {
+                    if is_env_subkey(
+                        name,
+                        &[
+                            "preprocessor",
+                            "enabled",
+                            "bucket",
+                            "region",
+                            "key_prefix",
+                            "no_credentials",
+                            "endpoint",
+                            "use_ssl",
+                            "server_side_encryption",
+                            "server_side_encryption_aws_kms",
+                            "server_side_encryption_kms_key_id",
+                            "enable_virtual_host_style",
+                            "rw_mode",
+                        ],
+                    ) {
                         let _ = map.next_value::<_Ignored>();
                     } else {
                         return Err(de::Error::unknown_field(
@@ -1157,6 +1220,43 @@ impl<'de> de::Visitor<'de> for S3Visitor {
             }
         }
 
+        f.finish().map_err(de::Error::custom)
+    }
+}
+
+#[derive(Default)]
+struct S3Fields {
+    enabled: Option<bool>,
+    bucket: Option<String>,
+    region: Option<String>,
+    key_prefix: Option<String>,
+    no_credentials: Option<bool>,
+    endpoint: Option<String>,
+    use_ssl: Option<bool>,
+    server_side_encryption: Option<bool>,
+    server_side_encryption_aws_kms: Option<bool>,
+    server_side_encryption_kms_key_id: Option<String>,
+    enable_virtual_host_style: Option<bool>,
+    rw_mode: Option<CacheMode>,
+}
+
+impl S3Fields {
+    fn finish(self) -> std::result::Result<S3, &'static str> {
+        let S3Fields {
+            enabled,
+            bucket,
+            region,
+            key_prefix,
+            no_credentials,
+            endpoint,
+            use_ssl,
+            server_side_encryption,
+            server_side_encryption_aws_kms,
+            server_side_encryption_kms_key_id,
+            enable_virtual_host_style,
+            rw_mode,
+        } = self;
+
         let mut enabled = enabled.unwrap_or(true);
 
         let bucket = if let Some(bucket) = bucket {
@@ -1172,9 +1272,7 @@ impl<'de> de::Visitor<'de> for S3Visitor {
             && (std::env::var_os("AWS_ACCESS_KEY_ID").is_some()
                 || std::env::var_os("AWS_SECRET_ACCESS_KEY").is_some())
         {
-            return Err(de::Error::custom(
-                "If setting S3 credentials, {{no_credentials}} must not be set.",
-            ));
+            return Err("If setting S3 credentials, {{no_credentials}} must not be set.");
         }
 
         if !enabled {
@@ -1355,13 +1453,15 @@ impl<'de> de::Visitor<'de> for CacheModeVisitor {
     where
         E: de::Error,
     {
-        match rw_mode.to_uppercase().as_str() {
-            "READ_ONLY" => Ok(CacheMode::ReadOnly),
-            "READ_WRITE" => Ok(CacheMode::ReadWrite),
-            _ => Err(de::Error::custom(format!(
-                "'{rw_mode}' must be 'READ_ONLY' or 'READ_WRITE'"
-            ))),
-        }
+        parse_cache_mode(rw_mode).map_err(E::custom)
+    }
+}
+
+fn parse_cache_mode(rw_mode: &str) -> std::result::Result<CacheMode, String> {
+    match rw_mode.to_uppercase().as_str() {
+        "READ_ONLY" => Ok(CacheMode::ReadOnly),
+        "READ_WRITE" => Ok(CacheMode::ReadWrite),
+        _ => Err(format!("'{rw_mode}' must be 'READ_ONLY' or 'READ_WRITE'")),
     }
 }
 
@@ -1433,6 +1533,7 @@ pub mod defaults {
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::config::{ClientConfig, Loadable};
 
     #[test]
     fn test_default_cache_order() {
@@ -1467,5 +1568,134 @@ mod test {
                 assert_eq!(cache.cmp(other), std::cmp::Ordering::Greater);
             }
         }
+    }
+
+    #[test]
+    fn defaults_match_serde_defaults() {
+        assert_eq!(Caches::default(), serde_json::from_str("{}").unwrap());
+        assert_eq!(Disk::default(), serde_json::from_str("{}").unwrap());
+    }
+
+    #[test]
+    fn unknown_cache_fields_rejected() {
+        for (table, expected) in [
+            (
+                "[cache.s3]\nbucket = \"b\"",
+                "unknown field `bogus`, expected one of `enabled`, `bucket`, `region`, `key_prefix`, \
+                 `no_credentials`, `endpoint`, `use_ssl`, `server_side_encryption`, \
+                 `server_side_encryption_aws_kms`, `server_side_encryption_kms_key_id`, \
+                 `enable_virtual_host_style`, `rw_mode`",
+            ),
+            (
+                "[cache.azure]\ncontainer = \"c\"",
+                "unknown field `bogus`, expected one of `container`, `key_prefix`, `rw_mode`, \
+                 `auth`, `connection_string`, `storage_account`, `endpoint`",
+            ),
+            (
+                "[cache.gcs]\nbucket = \"b\"",
+                "unknown field `bogus`, expected one of `bucket`, `key_prefix`, `cred_path`, \
+                 `service_account`, `credentials_url`, `rw_mode`",
+            ),
+        ] {
+            let err = ClientConfig::from_toml_impl(&format!("{table}\nbogus = 1\n"))
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains(expected), "{err}");
+        }
+    }
+
+    #[test]
+    fn env_subkeys_ignored() -> Result<()> {
+        // serde_env also yields the leading segments of multi-word keys (`key` for
+        // `key_prefix`), so keys starting with those are skipped in files too
+        for (table, prefixes) in [
+            (
+                "[cache.s3]\nbucket = \"b\"",
+                &[
+                    "preprocessor",
+                    "enabled",
+                    "bucket",
+                    "region",
+                    "key",
+                    "no",
+                    "endpoint",
+                    "use",
+                    "server",
+                    "enable",
+                    "rw",
+                ][..],
+            ),
+            (
+                "[cache.azure]\ncontainer = \"c\"",
+                &[
+                    "preprocessor",
+                    "enabled",
+                    "container",
+                    "key",
+                    "rw",
+                    "auth",
+                    "connection",
+                    "storage",
+                    "endpoint",
+                ][..],
+            ),
+            (
+                "[cache.gcs]\nbucket = \"b\"",
+                &[
+                    "preprocessor",
+                    "enabled",
+                    "bucket",
+                    "key",
+                    "cred",
+                    "oauth",
+                    "service",
+                    "credential",
+                    "rw",
+                ][..],
+            ),
+            (
+                "[cache]",
+                &[
+                    "configs",
+                    "multilevel",
+                    "read",
+                    "write",
+                    "skip",
+                    "rate",
+                    "disk_",
+                    "s3_",
+                    "redis_",
+                    "memcached_",
+                    "gcs_",
+                    "gha_",
+                    "azure_",
+                    "webdav_",
+                    "oss_",
+                    "cos_",
+                ][..],
+            ),
+        ] {
+            for prefix in prefixes {
+                let toml = format!("{table}\n{prefix}x = 1\n");
+                ClientConfig::from_toml_impl(&toml).with_context(|| toml.clone())?;
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_named_cache_dropped() -> Result<()> {
+        let config = ClientConfig::from_toml_impl(
+            r#"
+            [cache.custom]
+            type = "redis"
+            ttl = "not a number"
+
+            [cache.unknown]
+            type = "nope"
+            "#,
+        )?;
+        assert!(config.cache.configs.is_empty());
+        Ok(())
     }
 }

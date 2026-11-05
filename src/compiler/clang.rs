@@ -129,7 +129,7 @@ impl CCompilerImpl for Clang {
             executable,
             parsed_args,
             cwd,
-            env_vars.iter().cloned(),
+            env_vars,
             self.kind(),
             tolerate_failure,
         )

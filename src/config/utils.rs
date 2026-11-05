@@ -138,6 +138,18 @@ impl<'de> de::Deserialize<'de> for DeserializeBool {
     }
 }
 
+// The visit_str bodies call helpers like this one so that their code isn't compiled again for
+// every deserializer.
+fn parse_bool(v: &str) -> std::result::Result<bool, String> {
+    match v.to_lowercase().as_str() {
+        "true" | "on" | "1" => Ok(true),
+        "false" | "off" | "0" => Ok(false),
+        _ => Err(format!(
+            "invalid value: '{v}', expected 'true', 'on', '1', 'false', 'off' or '0'"
+        )),
+    }
+}
+
 pub fn deserialize_bool<'de, D>(deserializer: D) -> std::result::Result<bool, D::Error>
 where
     D: de::Deserializer<'de>,
@@ -162,13 +174,7 @@ where
         where
             E: de::Error,
         {
-            match v.to_lowercase().as_str() {
-                "true" | "on" | "1" => Ok(true),
-                "false" | "off" | "0" => Ok(false),
-                _ => Err(de::Error::custom(format!(
-                    "invalid value: '{v}', expected 'true', 'on', '1', 'false', 'off' or '0'"
-                ))),
-            }
+            parse_bool(v).map_err(E::custom)
         }
 
         fn visit_none<E>(self) -> std::result::Result<Self::Value, E>
@@ -222,13 +228,10 @@ where
         where
             E: de::Error,
         {
-            match v.to_lowercase().as_str() {
-                "" => Ok(None),
-                "true" | "on" | "1" => Ok(Some(true)),
-                "false" | "off" | "0" => Ok(Some(false)),
-                _ => Err(de::Error::custom(format!(
-                    "invalid value: '{v}', expected 'true', 'on', '1', 'false', 'off' or '0'"
-                ))),
+            if v.is_empty() {
+                Ok(None)
+            } else {
+                parse_bool(v).map(Some).map_err(E::custom)
             }
         }
 
@@ -257,12 +260,31 @@ where
     deserializer.deserialize_any(BoolOptionVisitor)
 }
 
+fn basedirs_from_str(dirs: &str, delim: char) -> std::result::Result<Basedirs, String> {
+    use crate::util::bytes_to_path;
+
+    if dirs.is_empty() {
+        return Ok(Basedirs::default());
+    }
+    dirs.split(delim)
+        .filter_map(|s| {
+            if s.is_empty() {
+                None
+            } else {
+                Some(s.as_bytes())
+            }
+        })
+        .map(|b| bytes_to_path(b).map(|b| b.into_owned()))
+        .try_collect::<_, Vec<_>, _>()
+        .map_err(Into::into)
+        .and_then(Basedirs::try_from)
+        .map_err(|e| format!("{e:#}"))
+}
+
 pub fn deserialize_basedirs<'de, D>(deserializer: D) -> std::result::Result<Basedirs, D::Error>
 where
     D: de::Deserializer<'de>,
 {
-    use crate::util::bytes_to_path;
-
     struct BasedirsVisitor(char);
 
     impl<'de> de::Visitor<'de> for BasedirsVisitor {
@@ -280,22 +302,7 @@ where
         where
             E: de::Error,
         {
-            if dirs.is_empty() {
-                return Ok(Basedirs::default());
-            }
-            dirs.split(self.0)
-                .filter_map(|s| {
-                    if s.is_empty() {
-                        None
-                    } else {
-                        Some(s.as_bytes())
-                    }
-                })
-                .map(|b| bytes_to_path(b).map(|b| b.into_owned()))
-                .try_collect::<_, Vec<_>, _>()
-                .map_err(Into::into)
-                .and_then(Basedirs::try_from)
-                .map_err(|e| E::custom(format!("{e:#}")))
+            basedirs_from_str(dirs, self.0).map_err(E::custom)
         }
 
         fn visit_seq<A>(self, seq: A) -> std::result::Result<Self::Value, A::Error>
@@ -522,6 +529,23 @@ impl<'de> de::Deserialize<'de> for DeserializeMapOfStringsToStrings {
     }
 }
 
+fn parse_env_assignments(value: &str) -> Option<HashMap<String, String>> {
+    crate::util::split_quoted_shell_str(value).map(|vars| {
+        vars.iter()
+            .filter_map(|s| s.trim().split_once("="))
+            .map(|(key, val)| {
+                (
+                    key.trim().to_owned(),
+                    val.trim()
+                        .trim_start_matches('"')
+                        .trim_end_matches('"')
+                        .to_owned(),
+                )
+            })
+            .collect()
+    })
+}
+
 pub fn deserialize_string_or_seq_to_map<'de, D>(
     deserializer: D,
 ) -> std::result::Result<HashMap<String, String>, D::Error>
@@ -545,23 +569,8 @@ where
         where
             E: de::Error,
         {
-            if let Some(vars) = crate::util::split_quoted_shell_str(value) {
-                Ok(vars
-                    .iter()
-                    .filter_map(|s| s.trim().split_once("="))
-                    .map(|(key, val)| {
-                        (
-                            key.trim().to_owned(),
-                            val.trim()
-                                .trim_start_matches('"')
-                                .trim_end_matches('"')
-                                .to_owned(),
-                        )
-                    })
-                    .collect::<Self::Value>())
-            } else {
-                Err(E::custom("Error splitting variables string"))
-            }
+            parse_env_assignments(value)
+                .ok_or_else(|| E::custom("Error splitting variables string"))
         }
 
         fn visit_map<A>(self, seq: A) -> std::result::Result<Self::Value, A::Error>

@@ -34,10 +34,7 @@ mod common {
     where
         T: for<'de> serde::Deserialize<'de> + Send + 'static,
     {
-        // Boxed so all `T`s share one blocking task type.
-        let task: Box<dyn FnOnce() -> bincode::Result<T> + Send> =
-            Box::new(move || bincode::deserialize_from(bytes.reader()));
-        tokio::task::spawn_blocking(task)
+        crate::util::spawn_blocking(move || bincode::deserialize_from(bytes.reader()))
             .await
             .map_err(anyhow::Error::new)?
             .map_err(anyhow::Error::new)
@@ -47,10 +44,7 @@ mod common {
     where
         T: serde::Serialize + Send + 'static,
     {
-        // Boxed so all `T`s share one blocking task type.
-        let task: Box<dyn FnOnce() -> bincode::Result<Vec<u8>> + Send> =
-            Box::new(move || bincode::serialize(&value));
-        tokio::task::spawn_blocking(task)
+        crate::util::spawn_blocking(move || bincode::serialize(&value))
             .await
             .map_err(anyhow::Error::new)?
             .map_err(anyhow::Error::new)
@@ -82,6 +76,14 @@ mod common {
     pub async fn bincode_req_fut<T: serde::de::DeserializeOwned + 'static>(
         req: reqwest::RequestBuilder,
     ) -> Result<T> {
+        let bytes = bincode_req_bytes(req).await?;
+        Ok(bincode::deserialize(&bytes)?)
+    }
+
+    // Kept apart from `bincode_req_fut` so sending the request and checking the
+    // response aren't instantiated once per response type.
+    #[cfg(any(feature = "dist-client", feature = "dist-server"))]
+    async fn bincode_req_bytes(req: reqwest::RequestBuilder) -> Result<bytes::Bytes> {
         let res = match req.send().await {
             Ok(res) => res,
             Err(err) => {
@@ -121,7 +123,7 @@ mod common {
                 anyhow::bail!(errmsg);
             }
         } else {
-            Ok(bincode::deserialize(&bytes)?)
+            Ok(bytes)
         }
     }
 }
@@ -251,40 +253,57 @@ mod scheduler {
     #[derive(Clone, Debug, PartialEq)]
     struct Accepted(pub Vec<String>);
 
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    enum Encoding {
+        Json,
+        Bincode,
+    }
+
     impl Accepted {
+        // Everything that doesn't depend on `T` lives outside `serialize`, so it
+        // isn't instantiated once per response type.
+        fn encoding(&self) -> Option<Encoding> {
+            let Self(mimetypes) = self;
+            mimetypes
+                .iter()
+                .find_map(|mimetype| match mimetype.as_ref() {
+                    "application/json" => Some(Encoding::Json),
+                    "application/octet-stream" | "*/*" => Some(Encoding::Bincode),
+                    _ => None,
+                })
+        }
+
         pub async fn serialize<T>(&self, res: T) -> Result<Response>
         where
             T: serde::Serialize + Send + 'static,
         {
-            let Self(mimetypes) = self;
-            for mimetype in mimetypes {
-                match mimetype.as_ref() {
-                    "application/json" => {
-                        return Ok(axum::response::Json(json!(res)).into_response());
-                    }
-                    "application/octet-stream" | "*/*" => {
-                        return Ok(match bincode_serialize(res).await {
-                            Ok(body) => (StatusCode::OK, body),
-                            Err(err) => {
-                                tracing::error!("Failed to serialize response body: {err:#}");
-                                (
-                                    StatusCode::INTERNAL_SERVER_ERROR,
-                                    format!("Failed to serialize response body: {err:#}")
-                                        .into_bytes(),
-                                )
-                            }
-                        }
-                        .into_response());
-                    }
-                    _ => continue,
-                }
-            }
-
-            let msg = "Request must accept application/json or application/octet-stream";
-            tracing::error!(msg);
-
-            Ok((StatusCode::BAD_REQUEST, msg.to_string().into_bytes()).into_response())
+            Ok(match self.encoding() {
+                Some(Encoding::Json) => axum::response::Json(json!(res)).into_response(),
+                Some(Encoding::Bincode) => bincode_response(bincode_serialize(res).await),
+                None => unacceptable_response(),
+            })
         }
+    }
+
+    fn bincode_response(body: Result<Vec<u8>>) -> Response {
+        match body {
+            Ok(body) => (StatusCode::OK, body),
+            Err(err) => {
+                tracing::error!("Failed to serialize response body: {err:#}");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Failed to serialize response body: {err:#}").into_bytes(),
+                )
+            }
+        }
+        .into_response()
+    }
+
+    fn unacceptable_response() -> Response {
+        let msg = "Request must accept application/json or application/octet-stream";
+        tracing::error!(msg);
+
+        (StatusCode::BAD_REQUEST, msg.to_string().into_bytes()).into_response()
     }
 
     #[derive(Clone, Debug, PartialEq)]
@@ -637,8 +656,8 @@ mod scheduler {
                     routing::get(|Extension::<Arc<HTTPMetrics>>(metrics)| async move {
                         let (reader, writer) = tokio::io::duplex(4096);
                         let writer = Box::new(SyncIoBridge::new(writer));
-                        tokio::spawn(async move {
-                            let _ = tokio::task::spawn_blocking(move || {
+                        crate::util::spawn_detached(async move {
+                            let _ = crate::util::spawn_blocking(move || {
                                 let _ = metrics.render_to_write(writer);
                             })
                             .await;
@@ -715,12 +734,8 @@ mod scheduler {
                     routing::get(
                         |TypedHeader(AcceptedMimeTypes(mime)),
                          Extension::<Arc<SchedulerState>>(state)| async move {
-                            state
-                                .service
-                                .get_status()
-                                .and_then(|res| mime.serialize(res))
-                                .map_err(AppError)
-                                .await
+                            let res = state.service.get_status().await.map_err(AppError)?;
+                            mime.serialize(res).await.map_err(AppError)
                         },
                     ),
                 )
@@ -772,22 +787,23 @@ mod scheduler {
                             // to storage that won't be cancelled. This ensures we don't perform an
                             // incomplete write if the client disconnects prematurely, for example,
                             // if a user ctrl-C's their build.
-                            tokio::spawn(async move {
+                            crate::util::spawn_detached(async move {
                                 let toolchain = Ok(toolchain.into_file())
                                     .and_then(|mut tc| tc.rewind().map(|_| tc))
                                     .and_then(|tc| unsafe { Mmap::map(&tc) }.map(Bytes::from_owner))
                                     .map_err(|_| AppError(anyhow!("")).into_response())?;
-                                service
+                                let res = match service
                                     .put_toolchain(&Toolchain { archive_id }, toolchain.into())
-                                    .map_ok(|_| SubmitToolchainResult::Success)
-                                    .or_else(|err| {
-                                        futures::future::ok(SubmitToolchainResult::Error {
-                                            message: err.to_string(),
-                                        })
-                                    })
-                                    .and_then(|res| mime.serialize(res))
-                                    .map_err(|e| AppError(e).into_response())
                                     .await
+                                {
+                                    Ok(_) => SubmitToolchainResult::Success,
+                                    Err(err) => SubmitToolchainResult::Error {
+                                        message: err.to_string(),
+                                    },
+                                };
+                                mime.serialize(res)
+                                    .await
+                                    .map_err(|e| AppError(e).into_response())
                             })
                             .await
                             .map_err(|_| AppError(anyhow!("")).into_response())?
@@ -804,9 +820,9 @@ mod scheduler {
                             state
                                 .service
                                 .del_toolchain(&Toolchain { archive_id })
-                                .and_then(|res| mime.serialize(res))
-                                .map_err(AppError)
                                 .await
+                                .map_err(AppError)?;
+                            mime.serialize(()).await.map_err(AppError)
                         },
                     ),
                 )
@@ -859,12 +875,14 @@ mod scheduler {
                             // to storage that won't be cancelled. This ensures we don't perform an
                             // incomplete write if the client disconnects prematurely, for example,
                             // if a user ctrl-C's their build.
-                            tokio::spawn(async move {
-                                service
+                            crate::util::spawn_detached(async move {
+                                let res = service
                                     .new_job(toolchain, inputs.into())
-                                    .and_then(|res| mime.serialize(res))
-                                    .map_err(|e| AppError(e).into_response())
                                     .await
+                                    .map_err(|e| AppError(e).into_response())?;
+                                mime.serialize(res)
+                                    .await
+                                    .map_err(|e| AppError(e).into_response())
                             })
                             .await
                             .map_err(|_| AppError(anyhow!("")).into_response())?
@@ -877,13 +895,15 @@ mod scheduler {
                         |TypedHeader(AcceptedMimeTypes(mime)),
                          Extension::<Arc<SchedulerState>>(state),
                          Bincode::<v3::NewJobRequest>(req)| async move {
-                            state
+                            let res = state
                                 .service
                                 .clone()
                                 .new_job_with_inputs(req.toolchain, req.inputs)
-                                .and_then(|res| mime.serialize(res))
-                                .map_err(|e| AppError(e).into_response())
                                 .await
+                                .map_err(|e| AppError(e).into_response())?;
+                            mime.serialize(res)
+                                .await
+                                .map_err(|e| AppError(e).into_response())
                         },
                     ),
                 )
@@ -915,12 +935,14 @@ mod scheduler {
                             // to storage that won't be cancelled. This ensures we don't perform an
                             // incomplete write if the client disconnects prematurely, for example,
                             // if a user ctrl-C's their build.
-                            tokio::spawn(async move {
+                            crate::util::spawn_detached(async move {
                                 service
                                     .put_job(&job_id, inputs.into())
-                                    .and_then(|res| mime.serialize(res))
-                                    .map_err(|e| AppError(e).into_response())
                                     .await
+                                    .map_err(|e| AppError(e).into_response())?;
+                                mime.serialize(())
+                                    .await
+                                    .map_err(|e| AppError(e).into_response())
                             })
                             .await
                             .map_err(|_| AppError(anyhow!("")).into_response())?
@@ -935,7 +957,7 @@ mod scheduler {
                          Extension::<Arc<SchedulerState>>(state),
                          Path::<String>(job_id),
                          RunJobBody(job): RunJobBody| async move {
-                            state
+                            let res: RunJobResponse = state
                                 .service
                                 .run_job(
                                     &job_id,
@@ -949,10 +971,12 @@ mod scheduler {
                                         save_outputs_as_job_input: false,
                                     },
                                 )
-                                .and_then(|res| futures::future::ok(res.into()))
-                                .and_then(|res: RunJobResponse| mime.serialize(res))
-                                .map_err(|err| AppError(err).into_response())
                                 .await
+                                .map_err(|err| AppError(err).into_response())?
+                                .into();
+                            mime.serialize(res)
+                                .await
+                                .map_err(|err| AppError(err).into_response())
                         },
                     ),
                 )
@@ -964,12 +988,14 @@ mod scheduler {
                          Extension::<Arc<SchedulerState>>(state),
                          Path::<String>(job_id),
                          Bincode(job): Bincode<v3::RunJobRequest>| async move {
-                            state
+                            let res = state
                                 .service
                                 .run_job(&job_id, job)
-                                .and_then(|res| mime.serialize(res))
-                                .map_err(|err| AppError(err).into_response())
                                 .await
+                                .map_err(|err| AppError(err).into_response())?;
+                            mime.serialize(res)
+                                .await
+                                .map_err(|err| AppError(err).into_response())
                         },
                     ),
                 )
@@ -980,12 +1006,8 @@ mod scheduler {
                         |TypedHeader(AcceptedMimeTypes(mime)),
                          Extension::<Arc<SchedulerState>>(state),
                          Path::<String>(job_id)| async move {
-                            state
-                                .service
-                                .del_job(&job_id)
-                                .and_then(|res| mime.serialize(res))
-                                .map_err(AppError)
-                                .await
+                            state.service.del_job(&job_id).await.map_err(AppError)?;
+                            mime.serialize(()).await.map_err(AppError)
                         },
                     ),
                 )
@@ -1078,6 +1100,42 @@ mod scheduler {
             let svc = server.handle(handle.clone()).serve(svc).map_err(Into::into);
 
             (handle, svc)
+        }
+    }
+
+    #[cfg(test)]
+    mod test {
+        use super::*;
+
+        async fn serialize(accept: &[&str]) -> (StatusCode, Bytes) {
+            let accepted = Accepted(accept.iter().map(|s| s.to_string()).collect());
+            let res = accepted.serialize(vec![1u32, 2]).await.unwrap();
+            let status = res.status();
+            let body = axum::body::to_bytes(res.into_body(), usize::MAX).await;
+            (status, body.unwrap())
+        }
+
+        #[tokio::test]
+        async fn serialize_uses_the_first_accepted_encoding() {
+            let json = Bytes::from_static(b"[1,2]");
+            let bincode = Bytes::from(bincode::serialize(&vec![1u32, 2]).unwrap());
+            let unacceptable = (
+                StatusCode::BAD_REQUEST,
+                Bytes::from_static(
+                    b"Request must accept application/json or application/octet-stream",
+                ),
+            );
+            assert_eq!(
+                serialize(&["text/html", "application/json", "*/*"]).await,
+                (StatusCode::OK, json)
+            );
+            assert_eq!(
+                serialize(&["application/octet-stream", "application/json"]).await,
+                (StatusCode::OK, bincode.clone())
+            );
+            assert_eq!(serialize(&["*/*"]).await, (StatusCode::OK, bincode));
+            assert_eq!(serialize(&["text/html"]).await, unacceptable);
+            assert_eq!(serialize(&[]).await, unacceptable);
         }
     }
 }
@@ -1349,7 +1407,7 @@ mod client {
             use itertools::Itertools;
             let ArchiveContents { dirs, files, links } = contents;
 
-            tokio::task::spawn_blocking(move || {
+            crate::util::spawn_blocking(move || {
                 let (mut digest, files, inputs) = files
                     .into_iter()
                     .map(|(dist_path, file_path)| {
@@ -1447,7 +1505,7 @@ mod client {
         }
 
         async fn put_job(&self, inputs: HashMap<String, JobInput>) -> Result<()> {
-            futures::future::try_join_all(inputs.into_iter().map(|(hash, input)| async move {
+            crate::util::try_join_all(inputs.into_iter().map(|(hash, input)| async move {
                 self.put_job_input
                     .call(PutInputArgs(hash, input))
                     .await

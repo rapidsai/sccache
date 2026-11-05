@@ -249,7 +249,7 @@ where
 {
     fn wait(self) -> O {
         let rt = single_threaded_runtime();
-        rt.block_on(self)
+        crate::util::block_on(&rt, self)
     }
 }
 

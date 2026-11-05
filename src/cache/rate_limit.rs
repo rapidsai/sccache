@@ -176,7 +176,7 @@ mod test {
     fn test_rate_limit_storage() -> Result<()> {
         let rt = utils::single_threaded_runtime();
 
-        rt.block_on(async {
+        crate::util::block_on(&rt, async {
             let storage = Arc::new(MockStorage::new(None, true));
 
             storage.next_get(Ok(Cache::Hit(b"val".to_vec().into())));
@@ -216,7 +216,7 @@ mod test {
     fn test_rate_limit_storage_read_timeout() -> Result<()> {
         let rt = utils::single_threaded_runtime();
 
-        rt.block_on(async {
+        crate::util::block_on(&rt, async {
             let storage = Arc::new(MockStorage::new(Some(Duration::from_secs(1)), true));
 
             storage.next_get(Ok(Cache::Hit(b"val".to_vec().into())));
@@ -250,7 +250,7 @@ mod test {
     fn test_rate_limit_storage_write_timeout() -> Result<()> {
         let rt = utils::single_threaded_runtime();
 
-        rt.block_on(async {
+        crate::util::block_on(&rt, async {
             let storage = Arc::new(MockStorage::new(Some(Duration::from_secs(1)), true));
 
             storage.next_get(Ok(Cache::Hit(b"val".to_vec().into())));

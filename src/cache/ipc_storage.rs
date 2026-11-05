@@ -31,7 +31,7 @@ use std::{
 /// client-side mode.
 ///
 /// `ServerConnection` is synchronous and non-`Clone`, so it lives behind a
-/// `Mutex` and every RPC dispatches via `tokio::task::spawn_blocking`.  The
+/// `Mutex` and every RPC dispatches via `crate::util::spawn_blocking`.  The
 /// lock is held only for the duration of a single blocking call, never across
 /// an `.await` point.
 pub struct IpcStorage {
@@ -60,7 +60,7 @@ impl IpcStorage {
 
     async fn rpc(&self, req: Request) -> Result<Response> {
         let conn = Arc::clone(&self.conn);
-        tokio::task::spawn_blocking(move || conn.lock().unwrap().request(req))
+        crate::util::spawn_blocking(move || conn.lock().unwrap().request(req))
             .await
             .context("spawn_blocking panicked")?
     }

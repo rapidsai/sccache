@@ -111,6 +111,41 @@ impl Acceptor for tokio::net::TcpListener {
     }
 }
 
+// A connected TCP or UDS stream.
+pub trait AsyncConnection: AsyncRead + AsyncWrite + Unpin + Send {}
+
+impl<T: AsyncRead + AsyncWrite + Unpin + Send> AsyncConnection for T {}
+
+// The server's listening socket. Giving TCP and UDS listeners one type means
+// the server and its per-connection machinery are compiled once rather than
+// once per kind of socket.
+pub enum Listener {
+    Tcp(tokio::net::TcpListener),
+    #[cfg(unix)]
+    Unix(tokio::net::UnixListener),
+}
+
+impl Acceptor for Listener {
+    type Socket = Box<dyn AsyncConnection>;
+
+    async fn accept(&self) -> tokio::io::Result<Self::Socket> {
+        let socket: Self::Socket = match self {
+            Listener::Tcp(l) => Box::new(l.accept().await?.0),
+            #[cfg(unix)]
+            Listener::Unix(l) => Box::new(l.accept().await?.0),
+        };
+        Ok(socket)
+    }
+
+    fn local_addr(&self) -> tokio::io::Result<Option<SocketAddr>> {
+        match self {
+            Listener::Tcp(l) => Acceptor::local_addr(l),
+            #[cfg(unix)]
+            Listener::Unix(l) => Acceptor::local_addr(l),
+        }
+    }
+}
+
 // A helper trait to unify the behavior of TCP and UDS stream.
 pub trait Connection: std::io::Read + std::io::Write + Send {
     fn try_clone(&self) -> std::io::Result<Box<dyn Connection>>;

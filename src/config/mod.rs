@@ -16,7 +16,7 @@ use crate::errors::*;
 use itertools::Itertools;
 use serde::{de, ser};
 use std::{
-    ffi::OsStr,
+    ffi::{OsStr, OsString},
     path::{Path, PathBuf},
 };
 
@@ -43,6 +43,18 @@ const DIST_APP_NAME: &str = "sccache-dist-client";
 const TEN_GIGS: u64 = 10 * 1024 * 1024 * 1024;
 pub const INSECURE_DIST_CLIENT_TOKEN: &str = "dangerously_insecure_client";
 
+// The loaders below take the collected vars, so that they and serde_env's parsing are compiled
+// once per config type rather than again for every caller's iterator type.
+fn collect_vars<I, S>(vars: I) -> Vec<(OsString, OsString)>
+where
+    I: IntoIterator<Item = (S, S)>,
+    S: AsRef<OsStr>,
+{
+    vars.into_iter()
+        .map(|(key, val)| (key.as_ref().to_owned(), val.as_ref().to_owned()))
+        .collect()
+}
+
 trait Loadable<D>
 where
     D: de::DeserializeOwned + ser::Serialize + Valid + Clone + Default + PartialEq,
@@ -56,116 +68,104 @@ where
     }
 
     fn merge_impl(file: &D, vars: &D) -> Result<D> {
-        use serde_json::to_string;
-        use serde_patch::{apply_mut, diff};
-
         let mut conf = Default::default();
 
         // Diff the default and the file conf
         let file_diff = if file != &conf {
-            Some(to_string(&diff(&conf, file)?)?)
+            Some(Self::json_diff(&conf, file)?)
         } else {
             None
         };
 
         // Diff the default and the vars conf
         let vars_diff = if vars != &conf {
-            Some(to_string(&diff(&conf, vars)?)?)
+            Some(Self::json_diff(&conf, vars)?)
         } else {
             None
         };
 
-        // Apply the file conf diff first
-        if let Some(file_diff) = file_diff {
-            apply_mut(&mut conf, &file_diff)?;
-        }
-
-        // Apply the vars conf diff second to override the file conf
-        if let Some(vars_diff) = vars_diff {
-            apply_mut(&mut conf, &vars_diff)?;
+        // Apply the file conf diff first, then the vars conf diff to override it
+        for diff in [file_diff, vars_diff].into_iter().flatten() {
+            let mut value = Self::to_json_value(&conf)?;
+            serde_patch::apply_mut(&mut value, diff)?;
+            conf = Self::from_json_impl(&value.to_string())?;
         }
 
         conf.validate_merged(file)
     }
 
+    fn json_diff(from: &D, to: &D) -> Result<String> {
+        let diff = serde_patch::diff(&Self::to_json_value(from)?, &Self::to_json_value(to)?)?;
+        Ok(diff.to_string())
+    }
+
+    // The merge goes through JSON text because serde_json::to_value/from_value would compile
+    // another Serialize and Deserialize of the whole config tree, while to_string_pretty
+    // (--show-config) and from_json_impl (JSON config files) are compiled anyway.
+    fn to_json_value(conf: &D) -> Result<serde_json::Value> {
+        Ok(serde_json::to_string_pretty(conf)?.parse()?)
+    }
+
     fn from_envs_and_path<I, S, O, P>(vars: I, path: O) -> Result<D>
     where
         I: IntoIterator<Item = (S, S)>,
-        S: AsRef<OsStr> + Clone,
+        S: AsRef<OsStr>,
         O: Into<Option<P>>,
         P: AsRef<Path>,
     {
-        Self::from_envs_and_path_impl(vars, path)
+        let path: Option<P> = path.into();
+        Self::from_var_list_and_path(&collect_vars(vars), path.as_ref().map(AsRef::as_ref))
     }
 
-    fn from_envs_and_path_impl<I, S, O, P>(vars: I, path: O) -> Result<D>
-    where
-        I: IntoIterator<Item = (S, S)>,
-        S: AsRef<OsStr> + Clone,
-        O: Into<Option<P>>,
-        P: AsRef<Path>,
-    {
-        // Collect the env vars first
-        let (v1, v2) = vars.into_iter().tee();
-
+    fn from_var_list_and_path(vars: &[(OsString, OsString)], path: Option<&Path>) -> Result<D> {
         // Read config from the environment
-        let vars = Self::from_vars(v1)?;
+        let conf = Self::from_var_list(vars)?;
 
         // Maybe read config from the config file
-        if let Some(file) = Self::from_path_or_conf(v2, path) {
-            Self::merge(&(file?), &vars)
+        if let Some(file) = Self::from_path_or_conf(vars, path) {
+            Self::merge(&(file?), &conf)
         } else {
-            vars.validate_vars()
+            conf.validate_vars()
         }
     }
 
+    #[cfg(test)]
     fn from_vars<I, S>(vars: I) -> Result<D>
     where
         I: IntoIterator<Item = (S, S)>,
         S: AsRef<OsStr>,
     {
+        Self::from_var_list(&collect_vars(vars))
+    }
+
+    fn from_var_list(vars: &[(OsString, OsString)]) -> Result<D> {
         Self::from_vars_impl(vars)?.validate_vars()
     }
 
-    fn from_vars_impl<I, S>(vars: I) -> Result<D>
-    where
-        I: IntoIterator<Item = (S, S)>,
-        S: AsRef<OsStr>,
-    {
+    fn from_vars_impl(vars: &[(OsString, OsString)]) -> Result<D> {
         serde_env::from_iter(Self::select_vars(vars)?)
             .map(|d: DeserializeWithPaths<D>| d.value)
             .map_err(|e| VarsError::from((Self::env_prefix(), e)).into())
     }
 
-    fn from_path_or_conf<I, S, O, P>(vars: I, path: O) -> Option<Result<D>>
-    where
-        I: IntoIterator<Item = (S, S)>,
-        S: AsRef<OsStr>,
-        O: Into<Option<P>>,
-        P: AsRef<Path>,
-    {
-        path.into()
-            .and_then(|path| {
-                // If path was explicitly provided, try to read it only
-                Self::from_path(path)
-            })
-            .or_else(|| {
-                // If path was not explicitly provided, try to read from SCCACHE_CONF
-                // If SCCACHE_CONF is not defined, try to read the ProjectDirectories
-                Self::from_envs(vars)
-            })
+    fn from_path_or_conf(vars: &[(OsString, OsString)], path: Option<&Path>) -> Option<Result<D>> {
+        path.and_then(|path| {
+            // If path was explicitly provided, try to read it only
+            Self::from_path(path)
+        })
+        .or_else(|| {
+            // If path was not explicitly provided, try to read from SCCACHE_CONF
+            // If SCCACHE_CONF is not defined, try to read the ProjectDirectories
+            Self::from_envs(vars)
+        })
     }
 
-    fn from_envs<Iter, S>(vars: Iter) -> Option<Result<D>>
-    where
-        Iter: IntoIterator<Item = (S, S)>,
-        S: AsRef<OsStr>,
-    {
+    fn from_envs(vars: &[(OsString, OsString)]) -> Option<Result<D>> {
         let path = if let Some(prefix) = Self::env_prefix() {
             let env_var = format!("{prefix}_CONF");
-            vars.into_iter().find_map(|(key, val)| {
-                if key.as_ref() == env_var.as_str() {
-                    Some(Path::new(val.as_ref()).to_owned())
+            vars.iter().find_map(|(key, val)| {
+                if key.as_os_str() == env_var.as_str() {
+                    Some(PathBuf::from(val))
                 } else {
                     None
                 }
@@ -176,7 +176,7 @@ where
 
         // If the SCCACHE_CONF envvar exists, attempt to load it
         if let Some(path) = path {
-            Self::from_path(path)
+            Self::from_path(&path)
         } else {
             // The directories crate changed the location of `config_dir` on macos in version 3,
             // so we also check the config in `preference_dir` (new in that version), which
@@ -195,15 +195,13 @@ where
                 dirs.config_dir().join("config.json"),
             ];
 
-            dirs.into_iter().find_map(Self::from_path)
+            dirs.iter().find_map(|path| Self::from_path(path))
         }
     }
 
-    fn from_path<P: AsRef<Path>>(path: P) -> Option<Result<D>> {
+    fn from_path(path: &Path) -> Option<Result<D>> {
         use fs_err::File;
         use std::io::Read;
-
-        let path = path.as_ref();
 
         let mut file = File::open(path)
             .inspect_err(|e| trace!("Couldn't open config file: {e}"))
@@ -246,11 +244,7 @@ where
             .map_err(|e| FileError::from(anyhow!(e)).into())
     }
 
-    fn select_vars<I, S>(vars: I) -> Result<impl IntoIterator<Item = (String, String)>>
-    where
-        I: IntoIterator<Item = (S, S)>,
-        S: AsRef<OsStr>,
-    {
+    fn select_vars(vars: &[(OsString, OsString)]) -> Result<Vec<(String, String)>> {
         use crate::util::os_str_to_str;
 
         let prefix_ = Self::env_prefix().map(|prefix| {
@@ -261,10 +255,10 @@ where
             }
         });
 
-        vars.into_iter()
+        vars.iter()
             .map(|(key, val)| {
-                let k = os_str_to_str(key.as_ref())?;
-                let v = os_str_to_str(val.as_ref())?;
+                let k = os_str_to_str(key.as_os_str())?;
+                let v = os_str_to_str(val.as_os_str())?;
                 if let Some(prefix_) = prefix_.as_deref() {
                     Ok(k.strip_prefix(prefix_)
                         .map(|k| (k.to_owned(), v.into_owned())))

@@ -287,7 +287,7 @@ mod client {
                 .await
                 .context("Failed to prepare toolchain cache dir")?;
 
-            tokio::task::block_in_place(|| package.write_tar_gz(f.as_file_mut()))
+            crate::util::block_in_place(&mut || package.write_tar_gz(f.as_file_mut()))
                 .context("Could not compress toolchain")?;
 
             cache.commit(f).await.context("Failed to cache toolchain")?;
@@ -586,39 +586,25 @@ mod server {
 
     fn gzip_inflate(deflated_path: PathBuf, inflated_path: PathBuf) -> std::io::Result<u64> {
         let deflated_file = fs::File::open(&deflated_path)?;
-
-        // Unpack the tgz into the inflated dir
-        // Manually implement `tar::Archive::unpack` in order to compute the inflated size
-        let mut archive = tar::Archive::new(GzipDecoder::new(BufReader::new(deflated_file)));
-
-        let mut inflated_size = 0;
-        let mut dirs = Vec::new();
-        let dst = &inflated_path.canonicalize().unwrap_or(inflated_path);
-
-        for entry in archive.entries()? {
-            let mut entry = entry?;
-            inflated_size += entry.size();
-            if entry.header().entry_type() == tar::EntryType::Directory {
-                dirs.push(entry);
-            } else {
-                entry.unpack_in(dst)?;
-            }
-        }
-
-        dirs.sort_by(|a, b| b.path_bytes().cmp(&a.path_bytes()));
-        for mut dir in dirs {
-            dir.unpack_in(dst)?;
-        }
-
-        Ok(inflated_size)
+        unpack_tar(
+            &mut GzipDecoder::new(BufReader::new(deflated_file)),
+            &inflated_path,
+        )
     }
 
     fn zlib_inflate(deflated_path: PathBuf, inflated_path: &Path) -> std::io::Result<u64> {
         let deflated_file = fs::File::open(&deflated_path)?;
+        unpack_tar(
+            &mut ZlibDecoder::new(BufReader::new(deflated_file)),
+            inflated_path,
+        )
+    }
 
+    // Takes `&mut dyn Read` so both decoders share one `tar::Archive` instantiation.
+    fn unpack_tar(reader: &mut dyn std::io::Read, inflated_path: &Path) -> std::io::Result<u64> {
         // Unpack the tgz into the inflated dir
         // Manually implement `tar::Archive::unpack` in order to compute the inflated size
-        let mut archive = tar::Archive::new(ZlibDecoder::new(BufReader::new(deflated_file)));
+        let mut archive = tar::Archive::new(reader);
 
         let mut inflated_size = 0;
         let mut dirs = Vec::new();
@@ -723,7 +709,7 @@ mod server {
                 .insert_with(job_id, deflated_size, |inflated_path: &Path| {
                     let inflated_path = inflated_path.to_owned();
                     async move {
-                        tokio::task::spawn_blocking(move || {
+                        crate::util::spawn_blocking(move || {
                             // Ensure the inflated dir exists first
                             fs::create_dir_all(&inflated_path)?;
                             let size = zlib_inflate(deflated_path, &inflated_path)?;
@@ -757,30 +743,29 @@ mod server {
                 return Ok(inflated_path);
             }
 
-            let (misses, inputs) = futures::future::join_all(files.values().unique().cloned().map(
-                |hash| async move {
+            let (misses, inputs) =
+                crate::util::join_all(files.values().unique().cloned().map(|hash| async move {
                     self.load_file(hash.clone()).await.map_err(|err| {
                         error!("Error loading input file: {err:?}");
                         hash
                     })
-                },
-            ))
-            .await
-            .into_iter()
-            .fold(
-                (BTreeSet::new(), BTreeMap::new()),
-                |(mut misses, mut inputs), result| {
-                    match result {
-                        Ok((hash, file)) => {
-                            inputs.insert(hash, file);
+                }))
+                .await
+                .into_iter()
+                .fold(
+                    (BTreeSet::new(), BTreeMap::new()),
+                    |(mut misses, mut inputs), result| {
+                        match result {
+                            Ok((hash, file)) => {
+                                inputs.insert(hash, file);
+                            }
+                            Err(hash) => {
+                                misses.insert(hash);
+                            }
                         }
-                        Err(hash) => {
-                            misses.insert(hash);
-                        }
-                    }
-                    (misses, inputs)
-                },
-            );
+                        (misses, inputs)
+                    },
+                );
 
             if !misses.is_empty() {
                 // error!("Misses: {misses:?}");
@@ -796,7 +781,7 @@ mod server {
                 .insert_with(hash, 0, |inflated_path: &Path| {
                     let base = inflated_path.to_owned();
                     async move {
-                        tokio::task::spawn_blocking(move || {
+                        crate::util::spawn_blocking(move || {
                             // Ensure the inflated dir exists first
                             fs::create_dir_all(&base)?;
 
@@ -958,7 +943,7 @@ mod server {
                     let deflated_path = deflated_path.to_owned();
                     let inflated_path = inflated_path.to_owned();
                     async move {
-                        tokio::task::spawn_blocking(move || {
+                        crate::util::spawn_blocking(move || {
                             // Ensure the inflated dir exists first
                             fs::create_dir_all(&inflated_path)?;
                             gzip_inflate(deflated_path, inflated_path)
@@ -968,6 +953,62 @@ mod server {
                 })
                 .await
                 .map(|(path, _)| path)
+        }
+    }
+
+    #[cfg(test)]
+    mod test {
+        use std::io::Write;
+        use std::path::Path;
+
+        fn tar_bytes() -> Vec<u8> {
+            let mut builder = tar::Builder::new(Vec::new());
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(tar::EntryType::Directory);
+            header.set_size(0);
+            header.set_mode(0o755);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, "dir/", std::io::empty())
+                .unwrap();
+            let mut header = tar::Header::new_gnu();
+            header.set_size(5);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, "dir/file.txt", &b"hello"[..])
+                .unwrap();
+            builder.into_inner().unwrap()
+        }
+
+        fn assert_unpacked(dir: &Path) {
+            assert!(dir.join("dir").is_dir());
+            assert_eq!(fs_err::read(dir.join("dir/file.txt")).unwrap(), b"hello");
+        }
+
+        #[test]
+        fn gzip_and_zlib_inflate_unpack_entries_and_return_inflated_size() {
+            let tmp = tempfile::tempdir().unwrap();
+            let gzip_path = tmp.path().join("toolchain.tar.gz");
+            let file = fs_err::File::create(&gzip_path).unwrap();
+            let mut gzip = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+            gzip.write_all(&tar_bytes()).unwrap();
+            gzip.finish().unwrap();
+            let zlib_path = tmp.path().join("inputs.zlib");
+            let file = fs_err::File::create(&zlib_path).unwrap();
+            let mut zlib = flate2::write::ZlibEncoder::new(file, flate2::Compression::default());
+            zlib.write_all(&tar_bytes()).unwrap();
+            zlib.finish().unwrap();
+
+            let gzip_dst = tmp.path().join("gzip");
+            fs_err::create_dir(&gzip_dst).unwrap();
+            assert_eq!(super::gzip_inflate(gzip_path, gzip_dst.clone()).unwrap(), 5);
+            assert_unpacked(&gzip_dst);
+
+            let zlib_dst = tmp.path().join("zlib");
+            fs_err::create_dir(&zlib_dst).unwrap();
+            assert_eq!(super::zlib_inflate(zlib_path, &zlib_dst).unwrap(), 5);
+            assert_unpacked(&zlib_dst);
         }
     }
 }

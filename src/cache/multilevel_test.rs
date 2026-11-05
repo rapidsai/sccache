@@ -49,7 +49,7 @@ fn test_multi_level_storage_get() {
     let cache1_storage: Arc<dyn Storage> = Arc::new(cache1);
     let cache2_storage: Arc<dyn Storage> = Arc::new(cache2);
 
-    runtime.block_on(async {
+    crate::util::block_on(&runtime, async {
         let storage = MultiLevelStorage::new(vec![
             Arc::clone(&cache1_storage),
             Arc::clone(&cache2_storage),
@@ -108,7 +108,7 @@ fn test_multi_level_storage_backfill_on_hit() {
     let cache1_storage: Arc<dyn Storage> = Arc::new(cache1);
     let cache2_storage: Arc<dyn Storage> = Arc::new(cache2);
 
-    runtime.block_on(async {
+    crate::util::block_on(&runtime, async {
         let storage = MultiLevelStorage::new(vec![
             Arc::clone(&cache1_storage),
             Arc::clone(&cache2_storage),
@@ -253,7 +253,7 @@ fn test_multilevel_raw_hit_reads_backend_once() {
     let l0 = Arc::new(InMemoryStorage::new());
     let l1 = Arc::new(InMemoryStorage::new());
 
-    runtime.block_on(async {
+    crate::util::block_on(&runtime, async {
         let storage = MultiLevelStorage::new(vec![
             l0.clone() as Arc<dyn Storage>,
             l1.clone() as Arc<dyn Storage>,
@@ -314,7 +314,7 @@ fn test_disk_plus_remote_to_remote_backfill() {
     let remote_l2 = Arc::new(InMemoryStorage::new()); // Redis-like
     let remote_l3 = Arc::new(InMemoryStorage::new()); // S3-like
 
-    runtime.block_on(async {
+    crate::util::block_on(&runtime, async {
         let storage = MultiLevelStorage::new(vec![
             disk_cache.clone() as Arc<dyn Storage>,
             remote_l1.clone() as Arc<dyn Storage>,
@@ -414,7 +414,7 @@ fn test_disk_plus_remotes_write_to_all() {
     let remote_l1 = Arc::new(InMemoryStorage::new());
     let remote_l2 = Arc::new(InMemoryStorage::new());
 
-    runtime.block_on(async {
+    crate::util::block_on(&runtime, async {
         let storage = MultiLevelStorage::new(vec![
             disk_cache.clone() as Arc<dyn Storage>,
             remote_l1.clone() as Arc<dyn Storage>,
@@ -472,7 +472,7 @@ fn test_remote_to_remote_backfill() {
     let cache_l1 = Arc::new(InMemoryStorage::new());
     let cache_l2 = Arc::new(InMemoryStorage::new());
 
-    runtime.block_on(async {
+    crate::util::block_on(&runtime, async {
         let storage = MultiLevelStorage::new(vec![
             cache_l0.clone() as Arc<dyn Storage>,
             cache_l1.clone() as Arc<dyn Storage>,
@@ -551,7 +551,10 @@ fn test_config_validation_invalid_level_name() {
         }
     };
 
-    let result = runtime.block_on(StorageKind::Compilations.create(&config.cache, &[]));
+    let result = crate::util::block_on(
+        &runtime,
+        StorageKind::Compilations.create(&config.cache, &[]),
+    );
 
     // Should error with unknown cache level
     assert!(result.is_err());
@@ -576,7 +579,7 @@ fn test_config_validation_empty_levels() {
         .build()
         .unwrap();
 
-    runtime.block_on(async {
+    crate::util::block_on(&runtime, async {
         let storage = MultiLevelStorage::new(vec![]).await;
 
         // Get should return miss (no levels to check)
@@ -598,7 +601,7 @@ fn test_config_validation_single_level() {
         .build()
         .unwrap();
 
-    runtime.block_on(async {
+    crate::util::block_on(&runtime, async {
         let storage = MultiLevelStorage::new(vec![cache.clone() as Arc<dyn Storage>]).await;
 
         let entry = opendal::Buffer::default();
@@ -649,7 +652,10 @@ fn test_config_level_not_configured() {
         }
     };
 
-    let result = runtime.block_on(StorageKind::Compilations.create(&config.cache, &[]));
+    let result = crate::util::block_on(
+        &runtime,
+        StorageKind::Compilations.create(&config.cache, &[]),
+    );
 
     // Should error with "not configured" or "requires" (when feature disabled)
     assert!(result.is_err());
@@ -683,7 +689,7 @@ fn test_concurrent_reads() {
     let cache_l1 = Arc::new(InMemoryStorage::new());
     let cache_l2 = Arc::new(InMemoryStorage::new());
 
-    runtime.block_on(async {
+    crate::util::block_on(&runtime, async {
         let storage = Arc::new(
             MultiLevelStorage::new(vec![
                 cache_l0.clone() as Arc<dyn Storage>,
@@ -737,7 +743,7 @@ fn test_concurrent_write_and_read() {
     let cache_l0 = Arc::new(InMemoryStorage::new());
     let cache_l1 = Arc::new(InMemoryStorage::new());
 
-    runtime.block_on(async {
+    crate::util::block_on(&runtime, async {
         let storage = Arc::new(
             MultiLevelStorage::new(vec![
                 cache_l0.clone() as Arc<dyn Storage>,
@@ -750,13 +756,13 @@ fn test_concurrent_write_and_read() {
         let storage_read = Arc::clone(&storage);
 
         // Concurrent write and read
-        let write_task = tokio::spawn(async move {
+        let write_task = crate::util::spawn_detached(async move {
             storage_write
                 .put("concurrent_key", opendal::Buffer::default())
                 .await
         });
 
-        let read_task = tokio::spawn(async move {
+        let read_task = crate::util::spawn_detached(async move {
             sleep(Duration::from_millis(10)).await;
             storage_read.get("concurrent_key").await
         });
@@ -785,7 +791,7 @@ fn test_large_data_handling() {
     let cache_l0 = Arc::new(InMemoryStorage::new());
     let cache_l1 = Arc::new(InMemoryStorage::new());
 
-    runtime.block_on(async {
+    crate::util::block_on(&runtime, async {
         let storage = MultiLevelStorage::new(vec![
             cache_l0.clone() as Arc<dyn Storage>,
             cache_l1.clone() as Arc<dyn Storage>,
@@ -828,7 +834,7 @@ fn test_storage_trait_methods() {
     let cache_l0 = Arc::new(InMemoryStorage::new());
     let cache_l1 = Arc::new(InMemoryStorage::new());
 
-    runtime.block_on(async {
+    crate::util::block_on(&runtime, async {
         let storage = MultiLevelStorage::new(vec![
             cache_l0 as Arc<dyn Storage>,
             cache_l1 as Arc<dyn Storage>,
@@ -871,7 +877,7 @@ fn test_all_levels_fail_on_put() {
     let cache_l0 = Arc::new(ReadOnlyStorage(Arc::new(InMemoryStorage::new())));
     let cache_l1 = Arc::new(ReadOnlyStorage(Arc::new(InMemoryStorage::new())));
 
-    runtime.block_on(async {
+    crate::util::block_on(&runtime, async {
         let storage = MultiLevelStorage::new(vec![
             cache_l0 as Arc<dyn Storage>,
             cache_l1 as Arc<dyn Storage>,
@@ -923,7 +929,7 @@ fn test_readonly_level_in_check() {
     // Wrap in ReadOnly
     let ro_cache = Arc::new(ReadOnlyStorage(Arc::new(disk_cache)));
 
-    runtime.block_on(async {
+    crate::util::block_on(&runtime, async {
         let storage = MultiLevelStorage::new(vec![ro_cache as Arc<dyn Storage>]).await;
 
         // check() should detect read-only mode
@@ -949,7 +955,7 @@ fn test_mixed_readonly_chain_is_readwrite_in_check() {
     // Writable L0, read-only L1
     let rw_l0 = Arc::new(InMemoryStorage::new());
     let ro_l1 = Arc::new(ReadOnlyStorage(Arc::new(InMemoryStorage::new())));
-    runtime.block_on(async {
+    crate::util::block_on(&runtime, async {
         let storage =
             MultiLevelStorage::new(vec![rw_l0 as Arc<dyn Storage>, ro_l1 as Arc<dyn Storage>])
                 .await;
@@ -962,7 +968,7 @@ fn test_mixed_readonly_chain_is_readwrite_in_check() {
     // Read-only L0, writable L1: still writable (put() skips L0)
     let ro_l0 = Arc::new(ReadOnlyStorage(Arc::new(InMemoryStorage::new())));
     let rw_l1 = Arc::new(InMemoryStorage::new());
-    runtime.block_on(async {
+    crate::util::block_on(&runtime, async {
         let storage =
             MultiLevelStorage::new(vec![ro_l0 as Arc<dyn Storage>, rw_l1 as Arc<dyn Storage>])
                 .await;
@@ -983,7 +989,7 @@ fn test_all_readonly_chain_is_readonly_in_check() {
 
     let ro_l0 = Arc::new(ReadOnlyStorage(Arc::new(InMemoryStorage::new())));
     let ro_l1 = Arc::new(ReadOnlyStorage(Arc::new(InMemoryStorage::new())));
-    runtime.block_on(async {
+    crate::util::block_on(&runtime, async {
         let storage =
             MultiLevelStorage::new(vec![ro_l0 as Arc<dyn Storage>, ro_l1 as Arc<dyn Storage>])
                 .await;
@@ -1014,7 +1020,7 @@ fn test_sequential_read_order() {
 
     // Put data only in L2 (slowest level)
     let key = "test_key_12345678901234567890";
-    runtime.block_on(async {
+    crate::util::block_on(&runtime, async {
         let mut entry = CacheWrite::default();
         entry.put_stdout(b"test data").unwrap();
         l2.put(key, opendal::Buffer::from(entry.finish().unwrap()))
@@ -1022,7 +1028,7 @@ fn test_sequential_read_order() {
             .unwrap();
     });
 
-    runtime.block_on(async {
+    crate::util::block_on(&runtime, async {
         let storage = MultiLevelStorage::new(vec![
             l0 as Arc<dyn Storage>,
             l1 as Arc<dyn Storage>,
@@ -1070,7 +1076,7 @@ fn test_read_stops_at_first_hit_not_parallel() {
     let key = "test_key_early_hit_1234567890ab";
 
     // Put data in L1
-    runtime.block_on(async {
+    crate::util::block_on(&runtime, async {
         let mut entry = CacheWrite::default();
         entry.put_stdout(b"L1 data").unwrap();
         l1.put(key, opendal::Buffer::from(entry.finish().unwrap()))
@@ -1078,7 +1084,7 @@ fn test_read_stops_at_first_hit_not_parallel() {
             .unwrap();
     });
 
-    runtime.block_on(async {
+    crate::util::block_on(&runtime, async {
         let storage = MultiLevelStorage::new(vec![
             l0 as Arc<dyn Storage>,
             l1 as Arc<dyn Storage>,
@@ -1174,12 +1180,15 @@ fn test_put_mode_ignore() {
     let cache_l0 = Arc::new(FailingStorage);
     let cache_l1 = Arc::new(FailingStorage);
 
-    let storage = runtime.block_on(MultiLevelStorage::with_write_error_policy(
-        vec![cache_l0 as Arc<dyn Storage>, cache_l1 as Arc<dyn Storage>],
-        WriteErrorPolicy::Ignore,
-    ));
+    let storage = crate::util::block_on(
+        &runtime,
+        MultiLevelStorage::with_write_error_policy(
+            vec![cache_l0 as Arc<dyn Storage>, cache_l1 as Arc<dyn Storage>],
+            WriteErrorPolicy::Ignore,
+        ),
+    );
 
-    runtime.block_on(async {
+    crate::util::block_on(&runtime, async {
         let entry = opendal::Buffer::new();
         let result = storage.put("test_key", entry).await;
 
@@ -1202,7 +1211,7 @@ fn test_put_mode_l0_fails_on_error() {
     let cache_l0 = Arc::new(FailingStorage);
     let cache_l1 = Arc::new(InMemoryStorage::new());
 
-    runtime.block_on(async {
+    crate::util::block_on(&runtime, async {
         let storage = MultiLevelStorage::with_write_error_policy(
             vec![cache_l0 as Arc<dyn Storage>, cache_l1 as Arc<dyn Storage>],
             WriteErrorPolicy::L0,
@@ -1236,7 +1245,7 @@ fn test_put_mode_l0_succeeds_if_l0_ok() {
     let cache_l0 = Arc::new(InMemoryStorage::new());
     let cache_l1 = Arc::new(FailingStorage);
 
-    runtime.block_on(async {
+    crate::util::block_on(&runtime, async {
         let storage = MultiLevelStorage::with_write_error_policy(
             vec![cache_l0 as Arc<dyn Storage>, cache_l1 as Arc<dyn Storage>],
             WriteErrorPolicy::L0,
@@ -1265,7 +1274,7 @@ fn test_put_mode_all_fails_on_any_error() {
     let cache_l0 = Arc::new(InMemoryStorage::new());
     let cache_l1 = Arc::new(FailingStorage);
 
-    runtime.block_on(async {
+    crate::util::block_on(&runtime, async {
         let storage = MultiLevelStorage::with_write_error_policy(
             vec![cache_l0 as Arc<dyn Storage>, cache_l1 as Arc<dyn Storage>],
             WriteErrorPolicy::All,
@@ -1297,7 +1306,7 @@ fn test_put_mode_all_succeeds_when_all_ok() {
     let cache_l0 = Arc::new(InMemoryStorage::new());
     let cache_l1 = Arc::new(InMemoryStorage::new());
 
-    runtime.block_on(async {
+    crate::util::block_on(&runtime, async {
         let storage = MultiLevelStorage::with_write_error_policy(
             vec![
                 cache_l0.clone() as Arc<dyn Storage>,
@@ -1343,7 +1352,7 @@ fn test_put_mode_all_skips_readonly() {
     let cache_l1 = Arc::new(ReadOnlyStorage(Arc::new(InMemoryStorage::new())));
     let cache_l2 = Arc::new(InMemoryStorage::new());
 
-    runtime.block_on(async {
+    crate::util::block_on(&runtime, async {
         let storage = MultiLevelStorage::with_write_error_policy(
             vec![
                 cache_l0.clone() as Arc<dyn Storage>,
@@ -1394,7 +1403,7 @@ fn test_multilevel_get_reads_from_all_levels() {
     let l0 = Arc::new(InMemoryStorage::new()); // empty
     let l1 = Arc::new(InMemoryStorage::new()); // will hold the entry
 
-    runtime.block_on(async {
+    crate::util::block_on(&runtime, async {
         let storage = MultiLevelStorage::new(vec![
             l0.clone() as Arc<dyn Storage>,
             l1.clone() as Arc<dyn Storage>,
@@ -1452,7 +1461,7 @@ fn test_multilevel_put_writes_to_all_levels() {
     let l0 = Arc::new(InMemoryStorage::new());
     let l1 = Arc::new(InMemoryStorage::new());
 
-    runtime.block_on(async {
+    crate::util::block_on(&runtime, async {
         let storage = MultiLevelStorage::new(vec![
             l0.clone() as Arc<dyn Storage>,
             l1.clone() as Arc<dyn Storage>,

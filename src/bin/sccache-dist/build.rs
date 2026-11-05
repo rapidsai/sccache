@@ -196,7 +196,7 @@ impl OverlayBuilder {
             overlay_env: Arc::new(overlay_env),
         };
         ret.cleanup().await?;
-        tokio::fs::create_dir_all(&ret.dir)
+        sccache::util::async_fs::create_dir_all(&ret.dir)
             .await
             .context("Failed to create builder builds directory")?;
         Ok(ret)
@@ -204,7 +204,7 @@ impl OverlayBuilder {
 
     async fn cleanup(&self) -> Result<()> {
         if self.dir.exists() {
-            tokio::fs::remove_dir_all(&self.dir)
+            sccache::util::async_fs::remove_dir_all(&self.dir)
                 .await
                 .context("Failed to clean up builder directory")?;
         }
@@ -223,7 +223,7 @@ impl OverlayBuilder {
             "[prepare_overlay_dirs({job_id})]: Creating build directory: {build_dir:?}"
         );
 
-        tokio::fs::create_dir_all(&build_dir)
+        sccache::util::async_fs::create_dir_all(&build_dir)
             .await
             .context("Failed to create build dir")
             .unwrap_or_else(|err| tracing::warn!("[prepare_overlay_dirs({job_id})]: {err:?}"));
@@ -394,21 +394,22 @@ impl OverlayBuilder {
                 cmd.kill_on_drop(true);
 
                 // Guard compiling until we get a token from the job queue
-                let _job_slot = runtime.block_on(async move {
+                let _job_slot = sccache::util::block_on_handle(runtime, async move {
                     job_queue.acquire().await.map_err(|_| BuildError::Cancelled)
                 })?;
 
                 tracing::debug!("[perform_build({job_id})]: performing compile");
                 tracing::trace!("[perform_build({job_id})]: bubblewrap command: {cmd:?}");
 
-                let output = runtime.block_on(async move {
-
+                let output = sccache::util::block_on_handle(runtime, async move {
                     let mut child = match cmd.spawn() {
                         Ok(child) => child,
                         Err(e) => return Some(Err(BuildError::SpawnChildProcess(e))),
                     };
 
-                    async fn buffer_output<S>(stream: Option<S>) -> std::result::Result<Vec<u8>, BuildError>
+                    async fn buffer_output<S>(
+                        stream: Option<S>,
+                    ) -> std::result::Result<Vec<u8>, BuildError>
                     where
                         S: AsyncReadExt + Unpin,
                     {
@@ -585,7 +586,7 @@ impl OverlayBuilder {
         );
 
         if build_dir.exists()
-            && let Err(e) = tokio::fs::remove_dir_all(build_dir).await
+            && let Err(e) = sccache::util::async_fs::remove_dir_all(build_dir).await
         {
             tracing::warn!(
                 "[finish_overlay({job_id})]: Failed to remove build directory {:?}: {e:?}",
@@ -654,7 +655,7 @@ impl BuilderIncoming for OverlayBuilder {
 
     async fn shutdown(&self) {
         self.job_queue.close();
-        futures::future::join_all(self.children.lock().await.drain().map(
+        sccache::util::join_all(self.children.lock().await.drain().map(
             |(job_id, (overlay, cancel, cancelled))| async move {
                 Self::finish_build(&job_id, overlay, cancel, cancelled).await;
             },
@@ -857,12 +858,11 @@ impl DockerBuilder {
                         "[perform_build({job_id})]: opening compressed toolchain {toolchain_tgz:?}"
                     );
 
-                    let toolchain =
-                        tokio::fs::File::open(&toolchain_tgz)
-                            .await
-                            .with_context(|| {
-                                format!("Failed to open compressed toolchain {toolchain_tgz:?}")
-                            })?;
+                    let toolchain = sccache::util::async_fs::open(&toolchain_tgz)
+                        .await
+                        .with_context(|| {
+                            format!("Failed to open compressed toolchain {toolchain_tgz:?}")
+                        })?;
 
                     let toolchain = async_compression::futures::bufread::GzipDecoder::new(
                         futures::io::BufReader::new(toolchain.compat()),
@@ -960,7 +960,7 @@ impl DockerBuilder {
                     .filter(|p| !p.exists())
                 {
                     tracing::trace!("[perform_build({job_id})]: creating host dir: {host_path:?}");
-                    tokio::fs::create_dir_all(&host_path)
+                    sccache::util::async_fs::create_dir_all(&host_path)
                         .await
                         .map_err(|e| BuildError::MakeOutputDir(host_path.to_path_buf(), e))?;
                 }
@@ -1112,7 +1112,7 @@ impl BuilderIncoming for DockerBuilder {
 
     async fn shutdown(&self) {
         self.job_queue.close();
-        futures::future::join_all(self.containers.lock().await.drain().map(
+        sccache::util::join_all(self.containers.lock().await.drain().map(
             |(job_id, c_name)| async move {
                 tracing::debug!("[shutdown({job_id})]: Removing container {c_name:?}");
                 Self::finish_container(&job_id, &c_name).await;

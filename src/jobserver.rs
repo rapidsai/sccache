@@ -65,7 +65,7 @@ impl Client {
                     let rt = tokio::runtime::Builder::new_current_thread()
                         .build()
                         .unwrap();
-                    rt.block_on(async {
+                    crate::util::block_on(&rt, async {
                         if let Some(sender) = rx.next().await {
                             drop(sender.send(token));
                         }

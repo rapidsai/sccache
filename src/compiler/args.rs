@@ -409,10 +409,11 @@ impl<T: ArgumentValue> ArgInfo<T> {
     /// string. For arguments with a value, where the value is separate, the
     /// `get_next_arg` function returns the next argument, in raw `OsString`
     /// form.
-    fn process<F>(self, arg: &str, get_next_arg: F) -> ArgParseResult<Argument<T>>
-    where
-        F: FnOnce() -> Option<OsString>,
-    {
+    fn process(
+        self,
+        arg: &str,
+        get_next_arg: &mut dyn FnMut() -> Option<OsString>,
+    ) -> ArgParseResult<Argument<T>> {
         Ok(match self {
             ArgInfo::Flag(s, variant) => {
                 debug_assert_eq!(s, arg);
@@ -631,7 +632,7 @@ where
             let s = arg.to_string_lossy();
             let arguments = &mut self.arguments;
             Some(match self.arg_info.search(&s[..]) {
-                Some(i) => i.clone().process(&s[..], || arguments.next()),
+                Some(i) => i.clone().process(&s[..], &mut || arguments.next()),
                 None => Ok(if s.starts_with('-') {
                     Argument::UnknownFlag(arg.clone())
                 } else {
@@ -845,69 +846,69 @@ mod tests {
     fn test_arginfo_process() {
         let info = flag!("-foo", FooFlag);
         assert_eq!(
-            info.process("-foo", || None).unwrap(),
+            info.process("-foo", &mut || None).unwrap(),
             arg!(Flag("-foo", FooFlag))
         );
 
         let info = take_arg!("-foo", OsString, Separated, Foo);
         assert_eq!(
-            info.clone().process("-foo", || None).unwrap_err(),
+            info.clone().process("-foo", &mut || None).unwrap_err(),
             ArgParseError::UnexpectedEndOfArgs
         );
         assert_eq!(
-            info.process("-foo", || Some("bar".into())).unwrap(),
+            info.process("-foo", &mut || Some("bar".into())).unwrap(),
             arg!(WithValue("-foo", Foo("bar"), Separated))
         );
 
         let info = take_arg!("-foo", OsString, Concatenated, Foo);
         assert_eq!(
-            info.clone().process("-foo", || None).unwrap(),
+            info.clone().process("-foo", &mut || None).unwrap(),
             arg!(WithValue("-foo", Foo(""), Concatenated))
         );
         assert_eq!(
-            info.process("-foobar", || None).unwrap(),
+            info.process("-foobar", &mut || None).unwrap(),
             arg!(WithValue("-foo", Foo("bar"), Concatenated))
         );
 
         let info = take_arg!("-foo", OsString, Concatenated(b'='), Foo);
         assert_eq!(
-            info.clone().process("-foo=", || None).unwrap(),
+            info.clone().process("-foo=", &mut || None).unwrap(),
             arg!(WithValue("-foo", Foo(""), Concatenated(b'=')))
         );
         assert_eq!(
-            info.process("-foo=bar", || None).unwrap(),
+            info.process("-foo=bar", &mut || None).unwrap(),
             arg!(WithValue("-foo", Foo("bar"), Concatenated(b'=')))
         );
 
         let info = take_arg!("-foo", OsString, CanBeSeparated, Foo);
         assert_eq!(
-            info.clone().process("-foo", || None).unwrap(),
+            info.clone().process("-foo", &mut || None).unwrap(),
             arg!(WithValue("-foo", Foo(""), Concatenated))
         );
         assert_eq!(
-            info.clone().process("-foobar", || None).unwrap(),
+            info.clone().process("-foobar", &mut || None).unwrap(),
             arg!(WithValue("-foo", Foo("bar"), CanBeSeparated))
         );
         assert_eq!(
-            info.process("-foo", || Some("bar".into())).unwrap(),
+            info.process("-foo", &mut || Some("bar".into())).unwrap(),
             arg!(WithValue("-foo", Foo("bar"), CanBeConcatenated))
         );
 
         let info = take_arg!("-foo", OsString, CanBeSeparated(b'='), Foo);
         assert_eq!(
-            info.clone().process("-foo", || None).unwrap_err(),
+            info.clone().process("-foo", &mut || None).unwrap_err(),
             ArgParseError::UnexpectedEndOfArgs
         );
         assert_eq!(
-            info.clone().process("-foo=", || None).unwrap(),
+            info.clone().process("-foo=", &mut || None).unwrap(),
             arg!(WithValue("-foo", Foo(""), CanBeSeparated(b'=')))
         );
         assert_eq!(
-            info.clone().process("-foo=bar", || None).unwrap(),
+            info.clone().process("-foo=bar", &mut || None).unwrap(),
             arg!(WithValue("-foo", Foo("bar"), CanBeSeparated(b'=')))
         );
         assert_eq!(
-            info.process("-foo", || Some("bar".into())).unwrap(),
+            info.process("-foo", &mut || Some("bar".into())).unwrap(),
             arg!(WithValue("-foo", Foo("bar"), CanBeConcatenated(b'=')))
         );
     }
@@ -1107,7 +1108,7 @@ mod tests {
 
     #[test]
     fn test_arginfo_process_take_concat_arg_delim_doesnt_crash() {
-        let _ = take_arg!("-foo", OsString, Concatenated(b'='), Foo).process("-foo", || None);
+        let _ = take_arg!("-foo", OsString, Concatenated(b'='), Foo).process("-foo", &mut || None);
     }
 
     #[cfg(debug_assertions)]
@@ -1117,14 +1118,16 @@ mod tests {
         #[test]
         #[should_panic]
         fn test_arginfo_process_flag() {
-            flag!("-foo", FooFlag).process("-bar", || None).unwrap();
+            flag!("-foo", FooFlag)
+                .process("-bar", &mut || None)
+                .unwrap();
         }
 
         #[test]
         #[should_panic]
         fn test_arginfo_process_take_arg() {
             take_arg!("-foo", OsString, Separated, Foo)
-                .process("-bar", || None)
+                .process("-bar", &mut || None)
                 .unwrap();
         }
 
@@ -1132,7 +1135,7 @@ mod tests {
         #[should_panic]
         fn test_arginfo_process_take_concat_arg() {
             take_arg!("-foo", OsString, Concatenated, Foo)
-                .process("-bar", || None)
+                .process("-bar", &mut || None)
                 .unwrap();
         }
 
@@ -1140,7 +1143,7 @@ mod tests {
         #[should_panic]
         fn test_arginfo_process_take_concat_arg_delim() {
             take_arg!("-foo", OsString, Concatenated(b'='), Foo)
-                .process("-bar", || None)
+                .process("-bar", &mut || None)
                 .unwrap();
         }
 
@@ -1148,7 +1151,7 @@ mod tests {
         #[should_panic]
         fn test_arginfo_process_take_maybe_concat_arg() {
             take_arg!("-foo", OsString, CanBeSeparated, Foo)
-                .process("-bar", || None)
+                .process("-bar", &mut || None)
                 .unwrap();
         }
 
@@ -1156,7 +1159,7 @@ mod tests {
         #[should_panic]
         fn test_arginfo_process_take_maybe_concat_arg_delim() {
             take_arg!("-foo", OsString, CanBeSeparated(b'='), Foo)
-                .process("-bar", || None)
+                .process("-bar", &mut || None)
                 .unwrap();
         }
 

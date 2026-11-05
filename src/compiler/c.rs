@@ -1188,8 +1188,8 @@ where
                 .await;
             (depsfile, needs_update, obj_key_and_deps)
         } else {
-            let (depsfile, needs_update, obj_key_and_deps) = runtime
-                .spawn_blocking({
+            let (depsfile, needs_update, obj_key_and_deps) =
+                crate::util::spawn_blocking_on(runtime, {
                     let out_pretty = out_pretty.clone().into_owned();
                     move || {
                         let (needs_update, obj_key_and_deps) = depsfile.find_dependencies_sync(
@@ -1250,11 +1250,7 @@ where
             for (name, data) in dependencies.outputs.iter() {
                 if let Some(desc) = depfile_outputs.remove(name.as_str()) {
                     depfile_futures.push(async {
-                        tokio::fs::File::options()
-                            .write(true)
-                            .create(true)
-                            .truncate(true)
-                            .open(cwd.join(&desc.path))
+                        crate::util::async_fs::create(cwd.join(&desc.path))
                             .await?
                             .write_all(data.as_bytes())
                             .await
@@ -1263,7 +1259,7 @@ where
             }
 
             let has_all_required_depfiles = depfile_futures.is_empty()
-                || futures::future::try_join_all(depfile_futures).await.is_ok();
+                || crate::util::try_join_all(depfile_futures).await.is_ok();
 
             has_all_required_depfiles
                 && (depfile_outputs.is_empty()
@@ -1381,10 +1377,10 @@ where
             let dependencies = deps.iter().cloned().collect::<Vec<_>>();
 
             sources = if use_async_io {
-                futures::future::try_join_all(dependencies.into_iter().map(|path| async {
+                crate::util::try_join_all(dependencies.into_iter().map(|path| async move {
                     if path.exists() {
                         SOURCE_FILE_CACHE
-                            .get(path, compile_timestamp)
+                            .get(&path, compile_timestamp)
                             .await
                             .map(Some)
                     } else {
@@ -1396,20 +1392,19 @@ where
                 .flatten()
                 .collect::<Vec<Arc<SourceFileEntry>>>()
             } else {
-                runtime
-                    .spawn_blocking(move || {
-                        dependencies
-                            .into_iter()
-                            .filter_map(|path| {
-                                if path.exists() {
-                                    Some(SOURCE_FILE_CACHE.get_sync(path, compile_timestamp))
-                                } else {
-                                    None
-                                }
-                            })
-                            .try_collect()
-                    })
-                    .await??
+                crate::util::spawn_blocking_on(runtime, move || {
+                    dependencies
+                        .into_iter()
+                        .filter_map(|path| {
+                            if path.exists() {
+                                Some(SOURCE_FILE_CACHE.get_sync(&path, compile_timestamp))
+                            } else {
+                                None
+                            }
+                        })
+                        .try_collect()
+                })
+                .await??
             };
 
             // Break early if we don't need to find the additional hidden dependencies
@@ -1435,10 +1430,10 @@ where
         }
 
         let outputs = if !depsfile.key.is_empty() && !dist_compile {
-            futures::future::try_join_all(parsed_args.outputs.iter().filter_map(|(name, desc)| {
+            crate::util::try_join_all(parsed_args.outputs.iter().filter_map(|(name, desc)| {
                 if name.starts_with("dep") {
                     Some(async {
-                        tokio::fs::read_to_string(cwd.join(&desc.path))
+                        crate::util::async_fs::read_to_string(cwd.join(&desc.path))
                             .await
                             .or_else(|err| {
                                 if desc.optional {
@@ -1724,13 +1719,16 @@ where
         //
         // Immediately drive the dependency cache write so it
         // runs concurrently to the compilation.
-        runtime.spawn(put_dependencies(
-            obj_key.to_owned(),
-            deps,
-            storage,
-            out_pretty,
-            cache_write_timeout,
-        ));
+        crate::util::spawn_detached_on(
+            &runtime,
+            put_dependencies(
+                obj_key.to_owned(),
+                deps,
+                storage,
+                out_pretty,
+                cache_write_timeout,
+            ),
+        );
     }
 
     Ok(dist_files)
@@ -1760,7 +1758,7 @@ impl<I: CCompilerImpl, T: CommandCreatorSync> pkg::InputsPackager for CCompilati
             dist_files.extend(get_dependencies_dist(&self.obj_key, deps_args).await?);
         }
 
-        let (contents, inputs, pt) = tokio::task::spawn_blocking({
+        let (contents, inputs, pt) = crate::util::spawn_blocking({
             let mut pt = path_transformer.clone();
             move || {
                 let mut package = pkg::ArchiveBuilder::new(&mut pt);
@@ -1792,8 +1790,7 @@ impl<I: CCompilerImpl, T: CommandCreatorSync> pkg::InputsPackager for CCompilati
 
 // Helper to use -print-file-name and -print-prog-name to look up
 // files by path.
-pub fn named_file<P: AsRef<Path>>(exe: P, arg: &str) -> Option<PathBuf> {
-    let executable = exe.as_ref();
+pub fn named_file(executable: &Path, arg: &str) -> Option<PathBuf> {
     let mut output = std::process::Command::new(executable)
         .arg(arg)
         .output()
@@ -1820,7 +1817,7 @@ pub fn named_file<P: AsRef<Path>>(exe: P, arg: &str) -> Option<PathBuf> {
     if path.is_absolute() {
         Some(path.into_owned())
     } else {
-        which::which(path.as_ref()).ok()
+        crate::util::which(path.as_os_str()).ok()
     }
 }
 
@@ -1836,7 +1833,7 @@ pub(crate) struct CToolchainPackager {
 #[cfg(feature = "dist-client")]
 #[allow(unused)]
 impl CToolchainPackager {
-    pub fn named_file<P: AsRef<Path>>(exe: P, arg: &str) -> Option<PathBuf> {
+    pub fn named_file(exe: &Path, arg: &str) -> Option<PathBuf> {
         named_file(exe, arg)
     }
 }
@@ -2057,6 +2054,16 @@ impl pkg::ToolchainPackager for CToolchainPackager {
                     self.executable.clone()
                 };
 
+                // One function instead of a flat_map per list keeps to one copy of the
+                // iterator code.
+                fn push_joined(out: &mut Vec<PathBuf>, roots: &[PathBuf], names: &[&str]) {
+                    for root in roots {
+                        for name in names {
+                            out.push(root.join(name));
+                        }
+                    }
+                }
+
                 let (contents, dirs, mut files): (Vec<PathBuf>, Vec<PathBuf>, Vec<PathBuf>) = {
                     use futures::{AsyncBufReadExt, future, io::BufReader};
                     use std::process::Stdio;
@@ -2209,21 +2216,21 @@ impl pkg::ToolchainPackager for CToolchainPackager {
                                     }));
                                 }
                                 "COMPBIN" => {
-                                    contents.extend(dirs.iter().map(|root| root.join("rcfiles")));
+                                    push_joined(&mut contents, &dirs, &["rcfiles"]);
                                 }
                                 "COMPLIB" => {
-                                    files.extend(dirs.iter().flat_map(|root| {
-                                        [
+                                    push_joined(
+                                        &mut files,
+                                        &dirs,
+                                        &[
                                             "acc_init_link_cuda.o",
                                             "cuda_init_register_end.o",
                                             "init_pgpf.o",
                                             "libmem.il",
                                             "nvhpc.ld",
                                             "nvhpc.syms",
-                                        ]
-                                        .iter()
-                                        .map(|name| root.join(name))
-                                    }));
+                                        ],
+                                    );
                                 }
                                 "CCOMPDIR" | "CPPCOMPDIR" => {
                                     // Add everything under `compilers/bin/tools`
@@ -2234,36 +2241,35 @@ impl pkg::ToolchainPackager for CToolchainPackager {
                                     contents.extend_from_slice(dirs.as_slice());
                                 }
                                 "CUDAROOT" | "DCUDADIR" | "USECUDAROOT" => {
-                                    files
-                                        .extend(dirs.iter().map(|root| root.join("nvvm/bin/cicc")));
-                                    files.extend(dirs.iter().flat_map(|root| {
-                                        ["include/cuda.h", "nvvm/lib64/libnvvm.so"]
-                                            .iter()
-                                            .map(|name| root.join(name))
-                                    }));
+                                    push_joined(&mut files, &dirs, &["nvvm/bin/cicc"]);
+                                    push_joined(
+                                        &mut files,
+                                        &dirs,
+                                        &["include/cuda.h", "nvvm/lib64/libnvvm.so"],
+                                    );
                                 }
                                 "CUDADIR" => {
-                                    files.extend(dirs.iter().flat_map(|root| {
-                                        [
+                                    push_joined(
+                                        &mut files,
+                                        &dirs,
+                                        &[
                                             "bin2c",
                                             "cudafe++",
                                             "fatbinary",
                                             "nvlink",
                                             "nvprune",
                                             "ptxas",
-                                        ]
-                                        .iter()
-                                        .map(|name| root.join(name))
-                                    }));
-                                    files.extend(dirs.iter().map(|root| root.join("nvcc.profile")));
+                                        ],
+                                    );
+                                    push_joined(&mut files, &dirs, &["nvcc.profile"]);
                                 }
                                 "CUDALIBDIR" => {}
                                 "LLVMBINDIR" => {
-                                    files.extend(dirs.iter().flat_map(|root| {
-                                        ["llc", "opt", "llvm-as", "llvm-link", "llvm-mc"]
-                                            .iter()
-                                            .map(|name| root.join(name))
-                                    }));
+                                    push_joined(
+                                        &mut files,
+                                        &dirs,
+                                        &["llc", "opt", "llvm-as", "llvm-link", "llvm-mc"],
+                                    );
                                 }
                                 _ => {}
                             }
@@ -2278,7 +2284,7 @@ impl pkg::ToolchainPackager for CToolchainPackager {
                         })
                 };
 
-                if let Ok(as_path) = which::which("as") {
+                if let Ok(as_path) = crate::util::which(OsStr::new("as")) {
                     files.push(as_path);
                 }
 
@@ -2331,7 +2337,7 @@ impl pkg::ToolchainPackager for CToolchainPackager {
                             .find(|(k, _)| k == "PATH")
                             .map(|(_, v)| v.as_os_str());
 
-                        which::which_in(ptxas, env_path, Path::new("")).ok()
+                        crate::util::which_in(&ptxas, env_path, Path::new("")).ok()
                     });
 
                 if let Some(ptxas) = ptxas {
@@ -2611,7 +2617,7 @@ impl<'a> HashKeyParams<'a> {
 
         let entries = if self.async_io {
             // Hash the input and dependencies
-            futures::future::try_join_all(self.input_files.into_iter().map(|path| async move {
+            crate::util::try_join_all(self.input_files.into_iter().map(|path| async move {
                 let path = self.cwd.join(path);
                 let entry = SOURCE_FILE_CACHE.get(&path, self.compile_timestamp).await?;
 
@@ -2630,31 +2636,29 @@ impl<'a> HashKeyParams<'a> {
             .await?
         } else {
             // Canonicalize and hash the dependencies on a background thread
-            runtime
-                .spawn_blocking({
-                    let cwd = self.cwd.to_owned();
-                    let out_pretty = self.parsed_args.output_pretty().into_owned();
-                    move || {
-                        let mut entries = vec![];
+            crate::util::spawn_blocking_on(runtime, {
+                let cwd = self.cwd.to_owned();
+                let out_pretty = self.parsed_args.output_pretty().into_owned();
+                move || {
+                    let mut entries = vec![];
 
-                        for path in self.input_files {
-                            let path = cwd.join(path.as_path());
-                            let entry =
-                                SOURCE_FILE_CACHE.get_sync(&path, self.compile_timestamp)?;
+                    for path in self.input_files {
+                        let path = cwd.join(path.as_path());
+                        let entry = SOURCE_FILE_CACHE.get_sync(&path, self.compile_timestamp)?;
 
-                            if entry.found_time {
-                                // __TIME__ found, disable caching
-                                debug!("[{out_pretty}]: Found __TIME__ in '{}'", path.display());
-                                entries.push(None);
-                            } else {
-                                entries.push(Some(entry.clone()));
-                            }
+                        if entry.found_time {
+                            // __TIME__ found, disable caching
+                            debug!("[{out_pretty}]: Found __TIME__ in '{}'", path.display());
+                            entries.push(None);
+                        } else {
+                            entries.push(Some(entry.clone()));
                         }
-
-                        Ok::<_, anyhow::Error>(entries)
                     }
-                })
-                .await??
+
+                    Ok::<_, anyhow::Error>(entries)
+                }
+            })
+            .await??
         };
 
         if entries.iter().any(|entry| entry.is_none()) {

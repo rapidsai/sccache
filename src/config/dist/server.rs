@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
 use serde_with::{FromInto, PickFirst, StringWithSeparator, formats::ColonSeparator, serde_as};
 use std::{
     collections::HashMap,
-    ffi::OsStr,
+    ffi::OsString,
     net::SocketAddr,
     path::{Path, PathBuf},
 };
@@ -79,7 +79,13 @@ pub struct Config {
 
 impl Config {
     pub fn load<P: AsRef<Path>, O: Into<Option<P>>>(path: O) -> crate::errors::Result<Self> {
-        Self::from_envs_and_path(std::env::vars_os(), path).map(|mut conf| {
+        Self::load_from_path(path.into().as_ref().map(AsRef::as_ref))
+    }
+
+    // Not generic, so sccache-dist calls this crate's copy of the config loader instead of
+    // compiling its own (release builds don't share generic instances between crates).
+    fn load_from_path(path: Option<&Path>) -> crate::errors::Result<Self> {
+        Self::from_envs_and_path::<_, _, _, &Path>(std::env::vars_os(), path).map(|mut conf| {
             if conf.id.is_empty() {
                 conf.id = defaults::default_server_id();
             }
@@ -88,12 +94,24 @@ impl Config {
     }
 }
 
-impl_add_for_config! { Config }
-
-// Delegate Default to #[serde(default)]
+// Same as the #[serde(default)]s, see `defaults_match_serde_defaults`.
 impl Default for Config {
     fn default() -> Self {
-        serde_json::from_str("{}").unwrap()
+        Self {
+            jobs: Caches::default(),
+            toolchains: Caches::default(),
+            builder: Builder::default(),
+            cache_dir: defaults::default_disk_cache_dir(),
+            health_check_bind_addr: None,
+            heartbeat_interval_ms: defaults::default_heartbeat_interval(),
+            max_per_core_load: Percent::default(),
+            max_per_core_prefetch: Percent::default(),
+            message_broker: None,
+            metrics: Metrics::default(),
+            id: String::new(),
+            shutdown_timeout_secs: defaults::default_shutdown_timeout(),
+            toolchain_cache_size: defaults::default_disk_cache_size(),
+        }
     }
 }
 
@@ -159,11 +177,7 @@ impl Loadable<Self> for Config {
         Some("SCCACHE_DIST")
     }
 
-    fn from_vars<I, S>(vars: I) -> Result<Self>
-    where
-        I: IntoIterator<Item = (S, S)>,
-        S: AsRef<OsStr>,
-    {
+    fn from_var_list(vars: &[(OsString, OsString)]) -> Result<Self> {
         let mut conf = Self::from_vars_impl(vars)?;
 
         // Remove Azure configs that don't have an auth mechanism
@@ -180,11 +194,7 @@ impl Loadable<Self> for Config {
         Ok(conf)
     }
 
-    fn select_vars<Iter, S>(vars: Iter) -> Result<impl IntoIterator<Item = (String, String)>>
-    where
-        Iter: IntoIterator<Item = (S, S)>,
-        S: AsRef<OsStr>,
-    {
+    fn select_vars(vars: &[(OsString, OsString)]) -> Result<Vec<(String, String)>> {
         use crate::util::os_str_to_str;
 
         let prefix_ = Self::env_prefix().map_or_else(
@@ -202,10 +212,10 @@ impl Loadable<Self> for Config {
         let metrics_ = ["DOGSTATSD_", "PROMETHEUS_"];
 
         let vars = vars
-            .into_iter()
+            .iter()
             .map(|(key, val)| -> Result<Vec<(String, String)>> {
-                let key = os_str_to_str(key.as_ref())?;
-                let val = os_str_to_str(val.as_ref())?;
+                let key = os_str_to_str(key.as_os_str())?;
+                let val = os_str_to_str(val.as_os_str())?;
 
                 // Only take vars that start with `SCCACHE_DIST_`
                 let key = if let Some(key) = key.strip_prefix(&prefix_) {
@@ -377,10 +387,14 @@ pub struct DockerBuilder {
     pub exec_cmd: Vec<String>,
 }
 
-// Delegate Default to #[serde(default)]
+// Same as the #[serde(default)]s, see `defaults_match_serde_defaults`.
 impl Default for DockerBuilder {
     fn default() -> Self {
-        serde_json::from_str("{}").unwrap()
+        Self {
+            image: defaults::default_docker_image(),
+            run_cmd: defaults::default_docker_run_cmd(),
+            exec_cmd: defaults::default_docker_exec_cmd(),
+        }
     }
 }
 
@@ -400,10 +414,16 @@ pub struct OverlayBuilder {
     pub env: HashMap<String, String>,
 }
 
-// Delegate Default to #[serde(default)]
+// Same as the #[serde(default)]s, see `defaults_match_serde_defaults`.
 impl Default for OverlayBuilder {
     fn default() -> Self {
-        serde_json::from_str("{}").unwrap()
+        Self {
+            build_dir: defaults::default_disk_cache_dir(),
+            bwrap_path: defaults::default_bwrap_path(),
+            exec_cmd: vec![],
+            lower_dirs: vec![],
+            env: HashMap::new(),
+        }
     }
 }
 
@@ -422,10 +442,15 @@ pub struct PotBuilder {
     pub pot_clone_args: Vec<String>,
 }
 
-// Delegate Default to #[serde(default)]
+// Same as the #[serde(default)]s, see `defaults_match_serde_defaults`.
 impl Default for PotBuilder {
     fn default() -> Self {
-        serde_json::from_str("{}").unwrap()
+        Self {
+            pot_fs_root: defaults::default_pot_fs_root(),
+            clone_from: defaults::default_pot_clone_from(),
+            pot_cmd: defaults::default_pot_cmd(),
+            pot_clone_args: defaults::default_pot_clone_args(),
+        }
     }
 }
 
@@ -491,6 +516,98 @@ pub mod defaults {
 mod test {
     use super::*;
     use crate::config::{cache::*, dist::*};
+
+    #[test]
+    fn defaults_match_serde_defaults() -> Result<()> {
+        assert_eq!(Config::default(), serde_json::from_str("{}").unwrap());
+        assert_eq!(
+            DockerBuilder::default(),
+            serde_json::from_str("{}").unwrap()
+        );
+        assert_eq!(
+            OverlayBuilder::default(),
+            serde_json::from_str("{}").unwrap()
+        );
+        assert_eq!(PotBuilder::default(), serde_json::from_str("{}").unwrap());
+
+        assert_eq!(
+            Config::from_toml_impl("[jobs]\n[toolchains]\n")?,
+            Config::default()
+        );
+        assert_eq!(
+            Config::from_toml_impl("[builder]\ntype = \"docker\"\n")?.builder,
+            Builder::Docker(DockerBuilder::default())
+        );
+        assert_eq!(
+            Config::from_toml_impl("[builder]\ntype = \"overlay\"\n")?.builder,
+            Builder::Overlay(OverlayBuilder::default())
+        );
+        assert_eq!(
+            Config::from_toml_impl("[builder]\ntype = \"pot\"\n")?.builder,
+            Builder::Pot(PotBuilder::default())
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn from_envs_and_path_merges_file_and_env() -> Result<()> {
+        drop(env_logger::try_init());
+
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("server.toml");
+        std::fs::write(
+            &path,
+            r#"
+            id = "file-id"
+            cache_dir = "/file/toolchains"
+
+            [builder]
+            type = "overlay"
+            build_dir = "/file/build"
+            "#,
+        )?;
+
+        let config = Config::from_envs_and_path(
+            [
+                ("SCCACHE_DIST_SERVER_ID", "env-id"),
+                ("SCCACHE_DIST_BUILDER_TYPE", "overlay"),
+                ("SCCACHE_DIST_OVERLAY_BUILD_DIR", "/env/build"),
+            ],
+            path,
+        )?;
+
+        assert_eq!(config.id, "env-id");
+        assert_eq!(config.cache_dir, PathBuf::from("/file/toolchains"));
+        assert_eq!(
+            config.builder,
+            Builder::Overlay(OverlayBuilder {
+                build_dir: "/env/build".into(),
+                ..Default::default()
+            })
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn load_reads_given_path() -> Result<()> {
+        drop(env_logger::try_init());
+
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("server.toml");
+        std::fs::write(&path, "id = \"file-id\"\ntoolchain_cache_size = 1234\n")?;
+
+        // `load` reads the process env too, so compare against a load from the same env
+        let expected = Config::from_envs_and_path(std::env::vars_os(), path.clone())?;
+        assert_eq!(Config::load::<&PathBuf, _>(Some(&path))?, expected);
+        assert_eq!(Config::load(path.clone())?, expected);
+
+        std::fs::write(&path, "")?;
+        assert!(!Config::load(path)?.id.is_empty());
+
+        Ok(())
+    }
 
     #[test]
     fn config_from_vars_amqp_addr() -> Result<()> {

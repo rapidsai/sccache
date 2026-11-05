@@ -142,16 +142,15 @@ impl CSourceFileCache {
         }
     }
 
-    pub async fn get<P: AsRef<Path>>(
+    pub async fn get(
         &self,
-        path: P,
+        path: &Path,
         compile_timestamp: chrono::DateTime<chrono::Utc>,
     ) -> Result<Arc<SourceFileEntry>> {
         use chrono::Datelike;
 
         // Assumes path has been canonicalized
-        let path = path.as_ref();
-        let meta = match tokio::fs::symlink_metadata(path).await {
+        let meta = match crate::util::async_fs::symlink_metadata(path).await {
             Ok(meta) => meta,
             Err(err) => {
                 bail!("Error reading metadata for '{}': {err:#}", path.display());
@@ -235,15 +234,14 @@ impl CSourceFileCache {
         Ok(entry)
     }
 
-    pub fn get_sync<P: AsRef<Path>>(
+    pub fn get_sync(
         &self,
-        path: P,
+        path: &Path,
         compile_timestamp: chrono::DateTime<chrono::Utc>,
     ) -> Result<Arc<SourceFileEntry>> {
         use chrono::Datelike;
 
         // Assumes path has been canonicalized
-        let path = path.as_ref();
         let meta = match fs::symlink_metadata(path) {
             Ok(meta) => meta,
             Err(err) => {
@@ -375,7 +373,7 @@ impl SourceFileDeps {
         match storage.get(key).await {
             Err(err) => Err(err),
             Ok(Cache::Miss) => Ok(Cache::Miss),
-            Ok(Cache::Hit(deflated)) => tokio::task::spawn_blocking(move || {
+            Ok(Cache::Hit(deflated)) => crate::util::spawn_blocking(move || {
                 Self::try_from(deflated).map_or_else(|_| Cache::Miss, Cache::Hit)
             })
             .await
@@ -388,7 +386,7 @@ impl SourceFileDeps {
     pub async fn put(self, storage: &dyn Storage) -> Result<Duration> {
         let key = self.key.clone();
 
-        let buf = tokio::task::spawn_blocking(move || self.into_buffer()).await??;
+        let buf = crate::util::spawn_blocking(move || self.into_buffer()).await??;
 
         storage.put(&key, buf).await
     }
@@ -412,7 +410,7 @@ impl SourceFileDeps {
             flate2::write::ZlibEncoder::new(BytesMut::new().writer(), flate2::Compression::best());
 
         writer.write_all(DEPS_VERSION)?;
-        bincode::serialize_into(&mut writer, &self)?;
+        crate::util::bincode_serialize_into(&mut writer, &self)?;
 
         writer
             .finish()
@@ -606,7 +604,7 @@ impl SourceFileDeps {
             let path = Path::new(&prev.path);
 
             if transitive {
-                let err = match tokio::fs::try_exists(path).await {
+                let err = match crate::util::async_fs::try_exists(path).await {
                     Ok(true) => continue,
                     Ok(false) => std::io::Error::new(
                         std::io::ErrorKind::NotFound,
@@ -908,17 +906,10 @@ static GCC_PRAGMA_ONCE_FIX_LOCK: std::sync::LazyLock<tokio::sync::Semaphore> =
     std::sync::LazyLock::new(|| tokio::sync::Semaphore::new(1));
 
 #[cfg(unix)]
-pub async fn build_gcc_pragma_once_fix<
-    Arg: AsRef<OsStr>,
-    Args: Iterator<Item = Arg> + Clone,
-    Exe: AsRef<Path>,
-    Key: AsRef<std::ffi::OsStr>,
-    Var: AsRef<std::ffi::OsStr>,
-    Envs: Iterator<Item = (Key, Var)> + Clone,
->(
-    exe: Exe,
-    args: Args,
-    env_vars: Envs,
+pub async fn build_gcc_pragma_once_fix(
+    exe: &Path,
+    args: &[&OsStr],
+    env_vars: &[(OsString, OsString)],
 ) -> Result<PathBuf> {
     use crate::{
         jobserver,
@@ -932,13 +923,9 @@ pub async fn build_gcc_pragma_once_fix<
     let temp = SCCACHE_TMPDIR.as_ref()?;
     let name = format!(
         "pragma_once_fix_{name}_{hash}.so",
-        name = exe
-            .as_ref()
-            .file_stem()
-            .unwrap_or(OsStr::new("gcc"))
-            .display(),
+        name = exe.file_stem().unwrap_or(OsStr::new("gcc")).display(),
         hash = {
-            let mut digest = Digest::from_file(exe.as_ref()).await?;
+            let mut digest = Digest::from_file(exe).await?;
             digest.update(GCC_PRAGMA_ONCE_FIX_SOURCE.as_bytes());
             digest.finish()
         }
@@ -954,9 +941,9 @@ pub async fn build_gcc_pragma_once_fix<
     file.as_file().lock()?;
 
     if !path.exists() || !path.is_file() || path.metadata()?.len() == 0 {
-        let mut cmd = AsyncCommand::new(exe.as_ref(), jobserver::Client::new_num(1));
+        let mut cmd = AsyncCommand::new(exe, jobserver::Client::new_num(1));
 
-        cmd.env_clear().envs(env_vars);
+        cmd.env_clear().envs(env_vars.iter().cloned());
 
         for arg in args {
             cmd.arg(arg);
@@ -2158,6 +2145,37 @@ mod test {
 
         assert_eq!(entry_b.iter().count(), 1);
         assert_eq!(buf.to_bytes(), entry_b.into_buffer()?.to_bytes());
+
+        Ok(())
+    }
+
+    // Entries already in caches must stay readable.
+    #[test]
+    fn test_into_buffer_encoding() -> Result<()> {
+        let meta = |path: &str| SourceFileMeta {
+            path: PathBuf::from(path).into(),
+            digest: "0123abcd".into(),
+            fsize: 42,
+            mtime: Some(Timestamp::new(1_700_000_000, 5)),
+            ctime: None,
+        };
+        let mut entry = SourceFileDeps::new("src_key".into(), meta("/src/file.c"));
+        entry.add_revision(
+            "obj_key",
+            Dependencies {
+                sources: vec![meta("/src/file.h"), meta("/usr/include/stdio.h")],
+                outputs: BTreeMap::from([("dep".into(), "file.o: file.c".into())]),
+            },
+            "file.c",
+        );
+
+        let mut inflated = vec![];
+        flate2::read::ZlibDecoder::new(entry.clone().into_buffer()?.reader())
+            .read_to_end(&mut inflated)?;
+        assert_eq!(
+            inflated,
+            [DEPS_VERSION, &bincode::serialize(&entry)?].concat()
+        );
 
         Ok(())
     }

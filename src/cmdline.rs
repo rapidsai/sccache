@@ -18,7 +18,6 @@ use std::env;
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::str::FromStr;
-use which::which_in;
 
 const ENV_VAR_INTERNAL_START_SERVER: &str = "SCCACHE_START_SERVER";
 
@@ -254,7 +253,7 @@ pub fn try_parse() -> Result<Command> {
                 _ => {
                     if let (Some(path), Some(exe_filename)) = (env::var_os("PATH"), exe.file_name())
                     {
-                        match which_in(exe_filename, Some(&path), &cwd) {
+                        match crate::util::which_in(exe_filename, Some(&path), &cwd) {
                             Ok(ref full_path)
                                 if dunce::canonicalize(full_path)?
                                     == dunce::canonicalize(env::current_exe()?)? =>
@@ -264,7 +263,9 @@ pub fn try_parse() -> Result<Command> {
                                         env::split_paths(&path).filter(|p| p != dir),
                                     )
                                     .ok();
-                                    if let Ok(full_path) = which_in(exe_filename, path, &cwd) {
+                                    if let Ok(full_path) =
+                                        crate::util::which_in(exe_filename, path.as_deref(), &cwd)
+                                    {
                                         args[0] = full_path.into();
                                     }
                                 }

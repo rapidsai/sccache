@@ -265,12 +265,11 @@ where
     // Parse the dep-info file, then hash the contents of those files.
     let cwd = cwd.to_owned();
     let name2 = crate_name.to_owned();
-    let parsed = pool
-        .spawn_blocking(move || {
-            parse_dep_file(&dep_file, &cwd)
-                .with_context(|| format!("Failed to parse dep info for {name2}"))
-        })
-        .await?;
+    let parsed = crate::util::spawn_blocking_on(pool, move || {
+        parse_dep_file(&dep_file, &cwd)
+            .with_context(|| format!("Failed to parse dep info for {name2}"))
+    })
+    .await?;
 
     parsed.map(move |(files, env_deps)| {
         trace!(
@@ -459,8 +458,10 @@ impl Rust {
             let rlib_dep_reader = {
                 let executable = executable.clone();
                 let env_vars = env_vars.to_owned();
-                pool.spawn_blocking(move || RlibDepReader::new_with_check(executable, &env_vars))
-                    .map_err(anyhow::Error::from)
+                crate::util::spawn_blocking_on(&pool, move || {
+                    RlibDepReader::new_with_check(executable, &env_vars)
+                })
+                .map_err(anyhow::Error::from)
             };
 
             let ((sysroot, libs), rlib_dep_reader) =
@@ -693,7 +694,7 @@ impl RustupProxy {
         let state = match state {
             Ok(ProxyPath::ToBeDiscovered) => {
                 // still no rustup found, use which crate to find one
-                match which::which(proxy_name) {
+                match crate::util::which(proxy_name.as_ref()) {
                     Ok(proxy_candidate) => {
                         warn!(
                             "proxy: rustup found, but not where it was expected (next to rustc {})",
@@ -2144,7 +2145,7 @@ impl pkg::InputsPackager for RustInputsPackager {
             env_vars,
         } = *self;
 
-        let (contents, inputs, pt) = tokio::task::spawn_blocking({
+        let (contents, inputs, pt) = crate::util::spawn_blocking({
             let mut pt = path_transformer.clone();
             move || {
                 let mut package = pkg::ArchiveBuilder::new(&mut pt);

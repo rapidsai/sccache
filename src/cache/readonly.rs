@@ -144,7 +144,7 @@ mod test {
             .unwrap();
 
         let storage = ReadOnlyStorage(Arc::new(MockStorage::new(None, true)));
-        runtime.block_on(async move {
+        crate::util::block_on(&runtime, async move {
             assert_eq!(
                 storage
                     .put("test1", "entry".into())

@@ -256,7 +256,8 @@ impl LruDiskCache {
     /// Make a path to the cache entry with key `key`
     /// Normalize key `abcdef` into `a/b/abcdef`
     pub fn key_to_rel_path<K: AsRef<OsStr>>(&self, key: K) -> PathBuf {
-        normalize_key(key)
+        // Always &OsStr, so normalize_key is compiled once whatever K is.
+        normalize_key(key.as_ref())
     }
 
     /// Return the path that `key` would be stored at.
@@ -472,7 +473,7 @@ impl LruDiskCache {
         let key = self.key_to_rel_path(key).into_os_string();
         self.pending.push(key.clone());
         self.pending_size += size;
-        tokio::fs::create_dir_all(&self.root).await?;
+        crate::util::async_fs::create_dir_all(&self.root).await?;
         crate::util::tempfile_with_prefix_in(&self.root, TEMPFILE_PREFIX)
             .map(|file| LruDiskCacheAddEntry { file, key, size })
             .map_err(Into::into)
@@ -490,7 +491,7 @@ impl LruDiskCache {
         let key = self.key_to_rel_path(key).into_os_string();
         self.pending.push(key.clone());
         self.pending_size += size;
-        tokio::fs::create_dir_all(&self.root).await?;
+        crate::util::async_fs::create_dir_all(&self.root).await?;
         crate::util::tempdir_with_prefix_in(&self.root, TEMPFILE_PREFIX)
             .map(|file| LruDiskCacheDirEntry { file, key, size })
             .map_err(Into::into)
@@ -512,7 +513,7 @@ impl LruDiskCache {
         self.cleanup_pending(&key, size);
         let abs_path = self.rel_to_abs_path(&key);
         if let Some(parent) = abs_path.parent() {
-            tokio::fs::create_dir_all(parent).await?;
+            crate::util::async_fs::create_dir_all(parent).await?;
         }
         file.persist(&abs_path).map_err(|e| e.error)?;
         self.lru.insert(key, real_size);
@@ -534,13 +535,13 @@ impl LruDiskCache {
                 self.cleanup_pending(&entry.key, entry.size);
                 let abs_path = self.rel_to_abs_path(&entry.key);
                 if let Some(parent) = abs_path.parent() {
-                    tokio::fs::create_dir_all(parent).await?;
+                    crate::util::async_fs::create_dir_all(parent).await?;
                 }
                 // If the dir is larger than the size that had been advertized, ensure
                 // we have enough space for it.
                 self.make_space_async(real_size.saturating_sub(entry.size))
                     .await?;
-                tokio::fs::rename(entry.as_path(), &abs_path).await?;
+                crate::util::async_fs::rename(entry.as_path(), &abs_path).await?;
                 self.lru.insert(entry.key.clone(), real_size);
                 Ok((abs_path, real_size))
             }

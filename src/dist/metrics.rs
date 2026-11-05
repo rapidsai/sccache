@@ -342,7 +342,7 @@ struct PrometheusMetrics {
     inner: PrometheusHandle,
     listen_path: Option<String>,
     #[allow(unused)]
-    exporter: tokio_util::task::AbortOnDropHandle<()>,
+    exporter: crate::util::AbortOnDropHandle<()>,
 }
 
 impl PrometheusMetrics {
@@ -448,6 +448,25 @@ impl MetricsInner for PrometheusMetrics {
     fn listen_path(&self) -> Option<String> {
         self.listen_path.clone()
     }
+}
+
+// Takes a slice so the metrics structs below share one `BTreeMap` collect (and
+// the sort inside it) instead of instantiating one per array iterator type.
+fn describe_metrics(
+    prefix: &str,
+    defs: &[(&'static str, metrics::Unit, &'static str)],
+) -> BTreeMap<&'static str, Cow<'static, str>> {
+    defs.iter()
+        .map(|&(name, unit, desc)| {
+            let metric_name = Cow::<'static, str>::Owned(format!("{prefix}::{name}"));
+            if matches!(unit, metrics::Unit::Count) {
+                metrics::describe_counter!(metric_name.clone(), unit, desc);
+            } else {
+                metrics::describe_histogram!(metric_name.clone(), unit, desc);
+            }
+            (name, metric_name)
+        })
+        .collect()
 }
 
 const HAS_JOB_INPUTS_TIME: &str = "has_job_inputs_time";
@@ -593,18 +612,8 @@ impl JobsMetrics {
                 Count,
                 "The number of errors raised storing job statuses.",
             ),
-        ]
-        .into_iter()
-        .map(|(name, unit, desc)| {
-            let metric_name = Cow::<'static, str>::Owned(format!("{prefix}::{name}"));
-            if matches!(unit, Count) {
-                metrics::describe_counter!(metric_name.clone(), unit, desc);
-            } else {
-                metrics::describe_histogram!(metric_name.clone(), unit, desc);
-            }
-            (name, metric_name)
-        })
-        .collect::<BTreeMap<&'static str, Cow<'static, str>>>();
+        ];
+        let m_names = describe_metrics(prefix, &m_names);
 
         Self { metrics, m_names }
     }
@@ -782,18 +791,8 @@ impl ToolchainsMetrics {
                 Seconds,
                 "The time to inflate and unpack a toolchain",
             ),
-        ]
-        .into_iter()
-        .map(|(name, unit, desc)| {
-            let metric_name = Cow::<'static, str>::Owned(format!("{prefix}::{name}"));
-            if matches!(unit, Count) {
-                metrics::describe_counter!(metric_name.clone(), unit, desc);
-            } else {
-                metrics::describe_histogram!(metric_name.clone(), unit, desc);
-            }
-            (name, metric_name)
-        })
-        .collect::<BTreeMap<&'static str, Cow<'static, str>>>();
+        ];
+        let m_names = describe_metrics(prefix, &m_names);
 
         Self { metrics, m_names }
     }
@@ -893,18 +892,8 @@ impl SysinfoMetrics {
                 Bytes,
                 "The amount of used system memory.", //
             ),
-        ]
-        .into_iter()
-        .map(|(name, unit, desc)| {
-            let metric_name = Cow::<'static, str>::Owned(format!("{prefix}::{name}"));
-            if matches!(unit, Count) {
-                metrics::describe_counter!(metric_name.clone(), unit, desc);
-            } else {
-                metrics::describe_histogram!(metric_name.clone(), unit, desc);
-            }
-            (name, metric_name)
-        })
-        .collect::<BTreeMap<&'static str, Cow<'static, str>>>();
+        ];
+        let m_names = describe_metrics(prefix, &m_names);
 
         let sysinfo = sysinfo::System::new_with_specifics(
             sysinfo::RefreshKind::nothing()
@@ -1007,78 +996,47 @@ impl ServerMetrics {
         let m_names = [
             (
                 JOB_LOADING_COUNT,
-                "gauge",
                 Count,
-                "The number of accepted jobs for which this server is loading inputs and toolchains."
+                "The number of accepted jobs for which this server is loading inputs and toolchains.",
             ),
             (
                 JOB_PENDING_COUNT,
-                "gauge",
                 Count,
-                "The number of accepted jobs that are fully loaded and queued to run/are currently running."
+                "The number of accepted jobs that are fully loaded and queued to run/are currently running.",
             ),
             (
                 JOB_BUILD_ERROR_COUNT,
-                "counter",
                 Count,
-                "The number of errors raised while running job builds."
+                "The number of errors raised while running job builds.",
             ),
             (
                 JOB_ACCEPTED_COUNT,
-                "counter",
                 Count,
-                "The total number of jobs accepted by this server (but not yet loaded or run)."
+                "The total number of jobs accepted by this server (but not yet loaded or run).",
             ),
             (
                 JOB_LOADED_COUNT,
-                "counter",
                 Count,
-                "The total number of jobs loaded by this server (but not yet run)."
+                "The total number of jobs loaded by this server (but not yet run).",
             ),
             (
                 JOB_FINISHED_COUNT,
-                "counter",
                 Count,
-                "The total number of jobs accepted, loaded, and run by this server."
+                "The total number of jobs accepted, loaded, and run by this server.",
             ),
             (
                 LOAD_JOB_TIME,
-                "histogram",
                 Seconds,
-                "The time to load each job's inputs and toolchains."
+                "The time to load each job's inputs and toolchains.",
             ),
-            (
-                RUN_BUILD_TIME,
-                "histogram",
-                Seconds,
-                "The time to run each job's build."
-            ),
+            (RUN_BUILD_TIME, Seconds, "The time to run each job's build."),
             (
                 RUN_JOB_TIME,
-                "histogram",
                 Seconds,
-                "The time to load and build each job."
+                "The time to load and build each job.",
             ),
-        ]
-        .into_iter()
-        .map(|(name, kind, unit, desc)| {
-            let metric_name = Cow::<'static, str>::Owned(format!("{prefix}::{name}"));
-            match kind {
-                "counter" => {
-                }
-                "gauge" => {
-                },
-                _ => {
-                }
-            }
-            if matches!(unit, Count) {
-                metrics::describe_counter!(metric_name.clone(), unit, desc);
-            } else {
-                metrics::describe_histogram!(metric_name.clone(), unit, desc);
-            }
-            (name, metric_name)
-        })
-        .collect::<BTreeMap<&'static str, Cow<'static, str>>>();
+        ];
+        let m_names = describe_metrics(prefix, &m_names);
 
         let jobs_pending = Arc::new(metrics.gauge(m_names.get(JOB_PENDING_COUNT).unwrap().clone()));
         let jobs_loading = Arc::new(metrics.gauge(m_names.get(JOB_LOADING_COUNT).unwrap().clone()));
@@ -1137,5 +1095,75 @@ impl ServerMetrics {
 
     pub fn run_job_timer(&self) -> TimeRecorder {
         self.metrics.timer(self.m_name(RUN_JOB_TIME))
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use metrics::{
+        Counter, Gauge, Histogram, Key, KeyName, Metadata, Recorder, SharedString, Unit,
+    };
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct Descriptions(Mutex<Vec<(&'static str, String, Option<Unit>, String)>>);
+
+    impl Descriptions {
+        fn push(&self, kind: &'static str, key: KeyName, unit: Option<Unit>, desc: SharedString) {
+            let entry = (kind, key.as_str().to_owned(), unit, desc.into_owned());
+            self.0.lock().unwrap().push(entry);
+        }
+    }
+
+    impl Recorder for Descriptions {
+        fn describe_counter(&self, key: KeyName, unit: Option<Unit>, desc: SharedString) {
+            self.push("counter", key, unit, desc);
+        }
+        fn describe_gauge(&self, key: KeyName, unit: Option<Unit>, desc: SharedString) {
+            self.push("gauge", key, unit, desc);
+        }
+        fn describe_histogram(&self, key: KeyName, unit: Option<Unit>, desc: SharedString) {
+            self.push("histogram", key, unit, desc);
+        }
+        fn register_counter(&self, _: &Key, _: &Metadata<'_>) -> Counter {
+            Counter::noop()
+        }
+        fn register_gauge(&self, _: &Key, _: &Metadata<'_>) -> Gauge {
+            Gauge::noop()
+        }
+        fn register_histogram(&self, _: &Key, _: &Metadata<'_>) -> Histogram {
+            Histogram::noop()
+        }
+    }
+
+    #[test]
+    fn describe_metrics_describes_counts_as_counters_and_the_rest_as_histograms() {
+        let recorder = Descriptions::default();
+        let names = metrics::with_local_recorder(&recorder, || {
+            super::describe_metrics(
+                "sccache::test",
+                &[
+                    ("b", Unit::Count, "Counts b."),
+                    ("a", Unit::Seconds, "Times a."),
+                ],
+            )
+        });
+        assert_eq!(
+            names.into_iter().collect::<Vec<_>>(),
+            [
+                ("a", "sccache::test::a".into()),
+                ("b", "sccache::test::b".into())
+            ]
+        );
+        let described = |kind, name: &str, unit, desc: &str| {
+            (kind, name.to_owned(), Some(unit), desc.to_owned())
+        };
+        assert_eq!(
+            recorder.0.into_inner().unwrap(),
+            [
+                described("counter", "sccache::test::b", Unit::Count, "Counts b."),
+                described("histogram", "sccache::test::a", Unit::Seconds, "Times a."),
+            ]
+        );
     }
 }

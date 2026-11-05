@@ -176,7 +176,7 @@ impl CacheRead {
     where
         T: IntoIterator<Item = FileObjectSource> + Send + Sync + 'static,
     {
-        pool.spawn_blocking(move || {
+        crate::util::spawn_blocking_on(pool, move || {
             for FileObjectSource {
                 key,
                 dir,
@@ -287,7 +287,7 @@ impl CacheWrite {
     {
         let start_create_artifact = Instant::now();
 
-        pool.spawn_blocking(move || {
+        crate::util::spawn_blocking_on(pool, move || {
             let mut entry = CacheWrite::new();
             for FileObjectSource {
                 key,
@@ -461,7 +461,7 @@ mod tests {
             optional: false,
         }];
 
-        let result = runtime.block_on(cache_read.extract_objects(objects, pool));
+        let result = crate::util::block_on(&runtime, cache_read.extract_objects(objects, pool));
         assert!(result.is_ok(), "Extracting to /dev/null should succeed");
     }
 
@@ -482,7 +482,7 @@ mod tests {
         cache_data.put_bytes("test_key", data).unwrap();
         let cache_read =
             CacheRead::from(std::io::Cursor::new(cache_data.finish().unwrap())).unwrap();
-        runtime.block_on(async {
+        crate::util::block_on(&runtime, async {
             let (sender, mut receiver) = tokio::net::unix::pipe::pipe().unwrap();
             let sender_fd = sender.into_blocking_fd().unwrap();
             let raw_fd = sender_fd.as_raw_fd();
@@ -494,8 +494,10 @@ mod tests {
                 optional: false,
             }];
             // On FreeBSD, `/dev/fd/{fd}` does not always exist (i.e. without mounting `fdescfs`), so we skip this test if we get `ENOENT`.
-            if ! fd_path.exists() {
-                info!("Skipping test_extract_object_to_dev_fd_something because /dev/fd/{raw_fd} does not exist");
+            if !fd_path.exists() {
+                info!(
+                    "Skipping test_extract_object_to_dev_fd_something because /dev/fd/{raw_fd} does not exist"
+                );
                 return;
             }
             let result = cache_read.extract_objects(objects, pool).await;
@@ -546,7 +548,7 @@ mod tests {
             optional: false,
         }];
 
-        let result = runtime.block_on(cache_read.extract_objects(objects, pool));
+        let result = crate::util::block_on(&runtime, cache_read.extract_objects(objects, pool));
         assert!(
             result.is_ok(),
             "Extracting to the target path should succeed"
@@ -590,7 +592,7 @@ mod tests {
             optional: false,
         }];
 
-        let result = runtime.block_on(cache_read.extract_objects(objects, pool));
+        let result = crate::util::block_on(&runtime, cache_read.extract_objects(objects, pool));
         assert!(result.is_ok(), "Extracting to NUL should succeed");
     }
 }

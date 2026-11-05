@@ -46,10 +46,6 @@ pub trait ArchivePackager: Send + Sync {
     async fn compute_hash(&self) -> Result<String>;
     fn compress(&self, writer: &mut (dyn Write + Send)) -> Result<()>;
     fn write_tar_gz(&self, writer: &mut (dyn Write + Send)) -> Result<()>;
-    async fn build_async(
-        &self,
-        sink: &mut (dyn futures::io::AsyncWrite + Unpin + Send + Sync),
-    ) -> Result<()>;
 }
 
 #[async_trait]
@@ -290,9 +286,9 @@ impl<'a> ArchiveBuilder<'a> {
             .context("Failed transforming symlink paths")?;
 
         Ok(dist::ArchiveContents {
-            dirs: dirs_set,
-            files: file_set,
-            links: symlinks,
+            dirs: path_map(dirs_set),
+            files: path_map(file_set),
+            links: path_map(symlinks),
         })
     }
 
@@ -303,23 +299,36 @@ impl<'a> ArchiveBuilder<'a> {
             links: symlinks,
         } = self.describe()?;
         Ok(Arc::new(ArchivePackagerImpl {
-            dirs_set: dirs_set
-                .into_iter()
-                // Strip the leading slash
-                .map(|(k, v)| (tar_safe_path(k), v))
-                .collect(),
-            file_set: file_set
-                .into_iter()
-                // Strip the leading slash
-                .map(|(k, v)| (tar_safe_path(k), v))
-                .collect(),
-            symlinks: symlinks
-                .into_iter()
-                // Strip the leading slash
-                .map(|(k, v)| (tar_safe_path(k), v))
-                .collect(),
+            dirs_set: path_map(
+                dirs_set
+                    .into_iter()
+                    // Strip the leading slash
+                    .map(|(k, v)| (tar_safe_path(k), v))
+                    .collect(),
+            ),
+            file_set: path_map(
+                file_set
+                    .into_iter()
+                    // Strip the leading slash
+                    .map(|(k, v)| (tar_safe_path(k), v))
+                    .collect(),
+            ),
+            symlinks: path_map(
+                symlinks
+                    .into_iter()
+                    // Strip the leading slash
+                    .map(|(k, v)| (tar_safe_path(k), v))
+                    .collect(),
+            ),
         }))
     }
+}
+
+// The maps above are collected through a `Vec` so they share one `BTreeMap`
+// construction (and the stable sort inside it) per value type, instead of one
+// per iterator type.
+fn path_map<V>(entries: Vec<(PathBuf, V)>) -> BTreeMap<PathBuf, V> {
+    entries.into_iter().collect()
 }
 
 pub struct ArchivePackagerImpl {
@@ -341,7 +350,7 @@ impl ArchivePackager for ArchivePackagerImpl {
             if let Some(base) = src_path.parent() {
                 let abs_path = base.join(dst_path);
                 if abs_path.is_file() {
-                    digest = digest.with_file(abs_path).await?;
+                    digest = digest.with_file(&abs_path).await?;
                 }
             }
             digest.update(&path_to_bytes(tar_path.as_path())?);
@@ -411,270 +420,6 @@ impl ArchivePackager for ArchivePackagerImpl {
                     .from_borrowed_writer(writer, scope),
             )
         })
-    }
-
-    async fn build_async(
-        &self,
-        sink: &mut (dyn futures::io::AsyncWrite + Unpin + Send + Sync),
-    ) -> Result<()> {
-        let mut builder = async_tar::Builder::new(sink);
-
-        builder.follow_symlinks(false);
-        builder.mode(async_tar::HeaderMode::Deterministic);
-
-        // Add directories before symlinks to ensure the dirs exist
-        // before symlinks that may point at them are unpacked
-        for (tar_path, dir_path) in self.dirs_set.iter() {
-            // trace!("dir: '{}'", dir_path.display());
-            builder.append_dir(tar_path, dir_path).await?;
-        }
-        // Add symlinks before files to ensure the symlinks exist
-        // before files are unpacked to paths that may traverse them
-        for (tar_path, (_src_path, dst_path)) in self.symlinks.iter() {
-            // trace!(
-            //     "link: '{}' -> '{}'",
-            //     _src_path.display(),
-            //     dst_path.display()
-            // );
-            let mut header = async_tar::Header::new_gnu();
-            header.set_size(0);
-            header.set_mtime(0);
-            header.set_entry_type(async_tar::EntryType::Symlink);
-            // Leave `dst_path` as absolute, assuming the tar will
-            // be used in a chroot-like environment.
-            tar_async::append_link(&mut builder, &mut header, tar_path, dst_path).await?;
-        }
-        for (tar_path, file_path) in self.file_set.iter() {
-            // trace!("file: '{}'", file_path.display());
-            builder.append_path_with_name(file_path, tar_path).await?;
-        }
-
-        builder.finish().await.map_err(anyhow::Error::new)
-    }
-}
-
-mod tar_async {
-    use crate::util::{bytes_to_path, path_to_bytes};
-    use async_std::{io, prelude::*};
-    use async_tar::{Builder, EntryType, Header};
-    use futures::AsyncWrite;
-    use std::{
-        borrow::Cow,
-        path::{Component, Path},
-    };
-
-    // Implements missing async_tar::Builder::append_link :(
-
-    pub async fn append_link<W: AsyncWrite + Unpin + Send + Sync>(
-        builder: &mut Builder<W>,
-        header: &mut Header,
-        path: &Path,
-        target: &Path,
-    ) -> io::Result<()> {
-        prepare_header_path(builder, header, path).await?;
-        prepare_header_link(builder, header, target).await?;
-        header.set_cksum();
-        builder.append(header, io::empty()).await
-    }
-
-    async fn prepare_header_path<W: AsyncWrite + Unpin + Send + Sync>(
-        builder: &mut Builder<W>,
-        header: &mut Header,
-        path: &Path,
-    ) -> io::Result<()> {
-        // Try to encode the path directly in the header, but if it ends up not
-        // working (probably because it's too long) then try to use the GNU-specific
-        // long name extension by emitting an entry which indicates that it's the
-        // filename.
-        if let Err(e) = header.set_path(path) {
-            let data = path_to_bytes(path)?;
-            let max = header.as_old().name.len();
-            //  Since e isn't specific enough to let us know the path is indeed too
-            //  long, verify it first before using the extension.
-            if data.len() < max {
-                return Err(e);
-            }
-            let header2 = prepare_header(data.len() as u64, EntryType::GNULongName);
-            // null-terminated string
-            let mut data2 = data.chain(io::repeat(0).take(1));
-            builder.append(&header2, &mut data2).await?;
-            // Truncate the path to store in the header we're about to emit to
-            // ensure we've got something at least mentioned.
-            let path = bytes_to_path(Cow::Borrowed(&data[..max]))?;
-            set_truncated_path_for_gnu_header(header, &path)?;
-        }
-        Ok(())
-    }
-
-    async fn prepare_header_link<W: AsyncWrite + Unpin + Send + Sync>(
-        builder: &mut Builder<W>,
-        header: &mut Header,
-        link_name: &Path,
-    ) -> io::Result<()> {
-        // Same as previous function but for linkname
-        if let Err(e) = header.set_link_name(link_name) {
-            let data = path_to_bytes(link_name)?;
-            if data.len() < header.as_old().linkname.len() {
-                return Err(e);
-            }
-            let header2 = prepare_header(data.len() as u64, EntryType::GNULongLink);
-            let mut data2 = data.chain(io::repeat(0).take(1));
-            builder.append(&header2, &mut data2).await?;
-        }
-        Ok(())
-    }
-
-    fn prepare_header(size: u64, entry_type: EntryType) -> Header {
-        let mut header = Header::new_gnu();
-        let name = b"././@LongLink";
-        header.as_gnu_mut().unwrap().name[..name.len()].clone_from_slice(&name[..]);
-        header.set_mode(0o644);
-        header.set_uid(0);
-        header.set_gid(0);
-        header.set_mtime(0);
-        // + 1 to be compliant with GNU tar
-        header.set_size(size + 1);
-        header.set_entry_type(entry_type);
-        header.set_cksum();
-        header
-    }
-
-    // Sets the truncated path for GNU header
-    //
-    // Same as `set_path`` but skips some validations.
-    fn set_truncated_path_for_gnu_header<P: AsRef<Path>>(
-        header: &mut Header,
-        p: P,
-    ) -> io::Result<()> {
-        set_path_inner(header, p.as_ref(), true)
-    }
-
-    fn set_path_inner(
-        header: &mut Header,
-        path: &Path,
-        is_truncated_gnu_long_path: bool,
-    ) -> io::Result<()> {
-        if let Some(ustar) = header.as_ustar_mut() {
-            return ustar.set_path(path);
-        }
-        if is_truncated_gnu_long_path {
-            copy_path_into_gnu_long(&mut header.as_old_mut().name, path, false)
-        } else {
-            copy_path_into(&mut header.as_old_mut().name, path, false)
-        }
-        .map_err(|err| {
-            io::Error::new(
-                err.kind(),
-                format!("{} when setting path for {}", err, path.display()),
-            )
-        })
-    }
-
-    fn copy_path_into(slot: &mut [u8], path: &Path, is_link_name: bool) -> io::Result<()> {
-        copy_path_into_inner(slot, path, is_link_name, false)
-    }
-
-    fn copy_path_into_gnu_long(slot: &mut [u8], path: &Path, is_link_name: bool) -> io::Result<()> {
-        copy_path_into_inner(slot, path, is_link_name, true)
-    }
-
-    fn copy_path_into_inner(
-        mut slot: &mut [u8],
-        path: &Path,
-        is_link_name: bool,
-        is_truncated_gnu_long_path: bool,
-    ) -> io::Result<()> {
-        let mut emitted = false;
-        let mut needs_slash = false;
-        let mut iter = path.components().peekable();
-        while let Some(component) = iter.next() {
-            let bytes = path_to_bytes(Path::new(component.as_os_str()))?;
-            match (component, is_link_name) {
-                (Component::Prefix(..), false) | (Component::RootDir, false) => {
-                    return Err(std::io::Error::other("paths in archives must be relative"));
-                }
-                (Component::ParentDir, false) => {
-                    if is_truncated_gnu_long_path && iter.peek().is_none() {
-                        // If it's last component of a gnu long path we know that there might be more
-                        // to the component than .. (the rest is stored elsewhere)
-                        {}
-                    } else {
-                        return Err(std::io::Error::other(
-                            "paths in archives must not have `..`",
-                        ));
-                    }
-                }
-                // Allow "./" as the path
-                (Component::CurDir, false) if path.components().count() == 1 => {}
-                (Component::CurDir, false) => continue,
-                (Component::Normal(_), _) | (_, true) => {}
-            }
-            if needs_slash {
-                copy(&mut slot, b"/")?;
-            }
-            if bytes.contains(&b'/')
-                && let Component::Normal(..) = component
-            {
-                return Err(std::io::Error::other(
-                    "path component in archive cannot contain `/`",
-                ));
-            }
-            copy(&mut slot, &bytes)?;
-            if &*bytes != b"/" {
-                needs_slash = true;
-            }
-            emitted = true;
-        }
-        if !emitted {
-            return Err(std::io::Error::other(
-                "paths in archives must have at least one component",
-            ));
-        }
-        if ends_with_slash(path) {
-            copy(&mut slot, b"/")?;
-        }
-        return Ok(());
-
-        fn copy(slot: &mut &mut [u8], bytes: &[u8]) -> io::Result<()> {
-            copy_into(slot, bytes)?;
-            let tmp = std::mem::take(slot);
-            *slot = &mut tmp[bytes.len()..];
-            Ok(())
-        }
-    }
-
-    /// Copies `bytes` into the `slot` provided, returning an error if the `bytes`
-    /// array is too long or if it contains any nul bytes.
-    fn copy_into(slot: &mut [u8], bytes: &[u8]) -> io::Result<()> {
-        if bytes.len() > slot.len() {
-            Err(std::io::Error::other("provided value is too long"))
-        } else if bytes.contains(&0) {
-            Err(std::io::Error::other("provided value contains a nul byte"))
-        } else {
-            for (slot, val) in slot.iter_mut().zip(bytes.iter().chain(Some(&0))) {
-                *slot = *val;
-            }
-            Ok(())
-        }
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    fn ends_with_slash(p: &Path) -> bool {
-        p.to_string_lossy().ends_with('/')
-    }
-
-    #[cfg(windows)]
-    fn ends_with_slash(p: &Path) -> bool {
-        use std::os::windows::ffi::OsStrExt;
-        let last = p.as_os_str().encode_wide().last();
-        last == Some(b'/' as u16) || last == Some(b'\\' as u16)
-    }
-
-    #[cfg(any(unix, target_os = "redox"))]
-    fn ends_with_slash(p: &Path) -> bool {
-        use std::os::unix::ffi::OsStrExt;
-
-        p.as_os_str().as_bytes().ends_with(b"/")
     }
 }
 

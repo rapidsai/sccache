@@ -64,6 +64,8 @@ pub fn main() {
     // We only care if it's `1`
     init_logging(env::var("SCCACHE_START_SERVER").is_ok_and(|x| x == "1"));
 
+    util::install_crypto_provider();
+
     let command = match cmdline::try_parse() {
         Ok(cmd) => cmd,
         Err(e) => match e.downcast::<clap::error::Error>() {
@@ -128,7 +130,7 @@ pub fn compiler_version(exe: &std::path::Path) -> crate::errors::Result<String> 
     let jobserver = Client::new_num(1);
     let creator = ProcessCommandCreator::new(&jobserver);
     let handle = runtime.handle().clone();
-    runtime.block_on(async move {
+    util::block_on(&runtime, async move {
         get_compiler_info(creator, exe, &cwd, &[], &[], &handle, None)
             .await?
             .0

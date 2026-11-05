@@ -126,7 +126,7 @@ pub struct Compiler {
 }
 
 static COMPILER_VERSION_RE: LazyLock<Regex> = LazyLock::new(|| {
-    regex_static::regex!(r"^.*?(?P<major>\d+).*?(?P<minor>\d+).*?(?P<patch>\d+).*?$")
+    Regex::new(r"^.*?(?P<major>\d+).*?(?P<minor>\d+).*?(?P<patch>\d+).*?$").unwrap()
 });
 
 impl Compiler {

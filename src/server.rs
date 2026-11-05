@@ -30,7 +30,7 @@ use crate::{
 };
 
 use async_trait::async_trait;
-use bytes::{Bytes, BytesMut, buf::BufMut};
+use bytes::{Bytes, BytesMut};
 use filetime::FileTime;
 use fs::metadata;
 use fs_err as fs;
@@ -204,7 +204,7 @@ impl DistClientContainer {
         };
 
         let state = Self::create_state(config);
-        let state = pool.block_on(state);
+        let state = util::block_on_handle(pool, state);
         Self {
             state: futures::lock::Mutex::new(state),
         }
@@ -446,7 +446,7 @@ pub fn start_server<C: AsRef<ClientConfig>>(
 
     let notify = env::var_os("SCCACHE_STARTUP_NOTIFY");
 
-    let storage = runtime.block_on(async {
+    let storage = util::block_on(&runtime, async {
         StorageKind::Compilations
             .create(&config.cache, &config.basedirs)
             .await
@@ -466,9 +466,9 @@ pub fn start_server<C: AsRef<ClientConfig>>(
         match addr {
             crate::net::SocketAddr::Net(addr) => {
                 trace!("binding TCP {addr}");
-                let l = runtime.block_on(tokio::net::TcpListener::bind(addr))?;
+                let l = util::block_on(&runtime, tokio::net::TcpListener::bind(addr))?;
                 let srv = SccacheServer::<_>::with_listener(
-                    l,
+                    crate::net::Listener::Tcp(l),
                     runtime,
                     client,
                     dist_client,
@@ -491,7 +491,7 @@ pub fn start_server<C: AsRef<ClientConfig>>(
                     tokio::net::UnixListener::bind(path)?
                 };
                 let srv = SccacheServer::<_>::with_listener(
-                    l,
+                    crate::net::Listener::Unix(l),
                     runtime,
                     client,
                     dist_client,
@@ -515,7 +515,7 @@ pub fn start_server<C: AsRef<ClientConfig>>(
                     tokio::net::UnixListener::from_std(l)?
                 };
                 let srv = SccacheServer::<_>::with_listener(
-                    l,
+                    crate::net::Listener::Unix(l),
                     runtime,
                     client,
                     dist_client,
@@ -571,7 +571,7 @@ pub struct SccacheServer<A: crate::net::Acceptor, C: CommandCreatorSync = Proces
     wait: WaitUntilZero,
 }
 
-impl<C: CommandCreatorSync> SccacheServer<tokio::net::TcpListener, C> {
+impl<C: CommandCreatorSync> SccacheServer<crate::net::Listener, C> {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         port: u16,
@@ -583,10 +583,13 @@ impl<C: CommandCreatorSync> SccacheServer<tokio::net::TcpListener, C> {
         cache_write_timeout: Option<Duration>,
     ) -> Result<Self> {
         let addr = crate::net::SocketAddr::with_port(port);
-        let listener = runtime.block_on(tokio::net::TcpListener::bind(addr.as_net().unwrap()))?;
+        let listener = util::block_on(
+            &runtime,
+            tokio::net::TcpListener::bind(addr.as_net().unwrap()),
+        )?;
 
         Ok(Self::with_listener(
-            listener,
+            crate::net::Listener::Tcp(listener),
             runtime,
             client,
             dist_client,
@@ -698,7 +701,7 @@ impl<A: crate::net::Acceptor, C: CommandCreatorSync> SccacheServer<A, C> {
                 // We're not interested if the task panicked; immediately process
                 // another connection
                 #[allow(clippy::let_underscore_future)]
-                let _ = tokio::spawn(conn);
+                let _ = util::spawn_detached(conn);
             }
         };
 
@@ -768,7 +771,7 @@ impl<A: crate::net::Acceptor, C: CommandCreatorSync> SccacheServer<A, C> {
             }
         };
 
-        runtime.block_on(async move {
+        util::block_on(&runtime, async move {
             tokio::select! {
                 server = server => server,
                 _res = sys_info => Ok(()),
@@ -791,7 +794,9 @@ impl<A: crate::net::Acceptor, C: CommandCreatorSync> SccacheServer<A, C> {
         //
         // Note that we cap the amount of time this can take, however, as we
         // don't want to wait *too* long.
-        runtime.block_on(async { time::timeout(SHUTDOWN_TIMEOUT, wait).await })?;
+        util::block_on(&runtime, async {
+            time::timeout(SHUTDOWN_TIMEOUT, wait).await
+        })?;
 
         info!("ok, fully shutting down now");
 
@@ -1835,7 +1840,7 @@ where
             }
 
             if let Some(cache_write) = cache_write {
-                me.rt.clone().spawn(async move {
+                util::spawn_detached_on(&me.rt.clone(), async move {
                     match cache_write.await {
                         Err(e) => {
                             debug!("[{out_pretty}]: Error executing cache write: {e}");
@@ -2256,7 +2261,7 @@ impl ServerStats {
     /// Print stats in a human-readable format.
     ///
     /// Return the formatted width of each of the (name, value) columns.
-    fn print<T: ServerStatsWriter>(&self, writer: &mut T, advanced: bool) -> (usize, usize) {
+    fn print(&self, writer: &mut dyn ServerStatsWriter, advanced: bool) -> (usize, usize) {
         macro_rules! set_stat {
             ($vec:ident, $var:expr, $name:expr) => {{
                 // name, value, suffix length
@@ -2267,9 +2272,7 @@ impl ServerStats {
         macro_rules! set_lang_stat {
             ($vec:ident, $var:expr, $name:expr) => {{
                 $vec.push(($name.to_string(), $var.all().to_string(), 0));
-                let mut sorted_stats: Vec<_> = $var.counts.iter().collect();
-                sorted_stats.sort_by_key(|v| v.0);
-                for (lang, count) in sorted_stats.iter() {
+                for (lang, count) in sorted_by_name(&$var.counts) {
                     $vec.push((format!("{} ({})", $name, lang), count.to_string(), 0));
                 }
             }};
@@ -2277,9 +2280,7 @@ impl ServerStats {
         macro_rules! set_compiler_stat {
             ($vec:ident, $var:expr, $name:expr) => {{
                 $vec.push(($name.to_string(), $var.all().to_string(), 0));
-                let mut sorted_stats: Vec<_> = $var.adv_counts.iter().collect();
-                sorted_stats.sort_by_key(|v| v.0);
-                for (lang, count) in sorted_stats.iter() {
+                for (lang, count) in sorted_by_name(&$var.adv_counts) {
                     $vec.push((format!("{} ({})", $name, lang), count.to_string(), 0));
                 }
             }};
@@ -2453,19 +2454,9 @@ impl ServerStats {
             write_stats_vec!(stats_vec);
         }
 
-        // Compare values. If equal, compare keys to have a fully deterministic order.
-        let sort_func =
-            |(k1, v1): &(&String, &usize), (k2, v2): &(&String, &usize)| match v1.cmp(v2).reverse()
-            {
-                std::cmp::Ordering::Equal => k1.cmp(k2),
-                other => other,
-            };
-
         if !self.not_cached.is_empty() {
             writer.write("\nNon-cacheable reasons:");
-            let mut counts: Vec<_> = self.not_cached.iter().collect();
-            counts.sort_by(sort_func);
-            for (reason, count) in counts {
+            for (reason, count) in sorted_by_count_desc(&self.not_cached) {
                 writer.write(&format!("{reason:<name_width$} {count:>stat_width$}",));
             }
             writer.write("");
@@ -2473,25 +2464,10 @@ impl ServerStats {
         (name_width, stat_width)
     }
 
-    fn print_dist<T: ServerStatsWriter>(
-        &self,
-        writer: &mut T,
-        name_width: usize,
-        stat_width: usize,
-    ) {
-        // Compare values. If equal, compare keys to have a fully deterministic order.
-        let sort_func =
-            |(k1, v1): &(&String, &usize), (k2, v2): &(&String, &usize)| match v1.cmp(v2).reverse()
-            {
-                std::cmp::Ordering::Equal => k1.cmp(k2),
-                other => other,
-            };
-
+    fn print_dist(&self, writer: &mut dyn ServerStatsWriter, name_width: usize, stat_width: usize) {
         if !self.dist_compiles.is_empty() {
             writer.write("\nSuccessful distributed compiles");
-            let mut counts: Vec<_> = self.dist_compiles.iter().collect();
-            counts.sort_by(sort_func);
-            for (reason, count) in counts {
+            for (reason, count) in sorted_by_count_desc(&self.dist_compiles) {
                 writer.write(&format!(
                     "  {:<name_width$} {:>stat_width$}",
                     reason,
@@ -2553,6 +2529,22 @@ impl ServerStats {
             );
         }
     }
+}
+
+// The stats tables are keyed by unique names, so these unstable sorts give the
+// same order a stable sort would. Every table shares them, which keeps the sort
+// code to one copy per ordering.
+fn sorted_by_name(counts: &HashMap<String, u64>) -> Vec<(&String, &u64)> {
+    let mut sorted: Vec<_> = counts.iter().collect();
+    sorted.sort_unstable_by_key(|(name, _)| *name);
+    sorted
+}
+
+// Highest count first; names break ties so the order is deterministic.
+fn sorted_by_count_desc(counts: &HashMap<String, usize>) -> Vec<(&String, &usize)> {
+    let mut sorted: Vec<_> = counts.iter().collect();
+    sorted.sort_unstable_by(|(k1, v1), (k2, v2)| v2.cmp(v1).then_with(|| k1.cmp(k2)));
+    sorted
 }
 
 fn set_percentage_stat(
@@ -2715,9 +2707,7 @@ where
     type Error = Error;
 
     fn serialize(self: Pin<&mut Self>, item: &T) -> std::result::Result<Bytes, Self::Error> {
-        let mut bytes = BytesMut::new();
-        bincode::serialize_into((&mut bytes).writer(), item)?;
-        Ok(bytes.freeze())
+        Ok(util::bincode_serialize(item)?.into())
     }
 }
 
@@ -3027,6 +3017,72 @@ mod tests {
                 .position(|line| line.contains("server2"))
                 .unwrap();
             assert!(find_s1 < find_s2);
+        }
+    }
+
+    #[test]
+    fn test_print_sorted_counts() {
+        fn counts<V: Copy>(pairs: &[(&str, V)]) -> HashMap<String, V> {
+            pairs.iter().map(|&(k, v)| (k.to_owned(), v)).collect()
+        }
+
+        let stats = ServerStats {
+            cache_hits: PerLanguageCount {
+                counts: counts(&[("Rust", 3), ("C/C++", 5), ("CUDA", 1)]),
+                adv_counts: counts(&[("rust", 3), ("c/c++ [gcc]", 4), ("c/c++ [clang]", 1)]),
+            },
+            not_cached: counts(&[
+                ("@", 2),
+                ("missing input", 1),
+                ("-E", 2),
+                ("multiple input files", 7),
+            ]),
+            dist_compiles: counts(&[("server2", 3), ("server3", 9), ("server1", 3)]),
+            ..Default::default()
+        };
+
+        for (advanced, hits) in [
+            (false, [("C/C++", 5), ("CUDA", 1), ("Rust", 3)]),
+            (
+                true,
+                [("c/c++ [clang]", 1), ("c/c++ [gcc]", 4), ("rust", 3)],
+            ),
+        ] {
+            let mut writer = StringWriter::new();
+            let (name_width, stat_width) = stats.print(&mut writer, advanced);
+            stats.print_dist(&mut writer, name_width, stat_width);
+            let output = writer.get_output();
+
+            let row = |indent: &str, name: &str, n: u64| {
+                let name_width = name_width - indent.len();
+                format!("{indent}{name:<name_width$} {n:>stat_width$}\n")
+            };
+            let lang_rows: String = hits
+                .iter()
+                .map(|(lang, n)| row("", &format!("Cache hits ({lang})"), *n))
+                .collect();
+            let reason_rows: String = [
+                ("multiple input files", 7),
+                ("-E", 2),
+                ("@", 2),
+                ("missing input", 1),
+            ]
+            .iter()
+            .map(|(reason, n)| row("", reason, *n))
+            .collect();
+            let server_rows: String = [("server3", 9), ("server1", 3), ("server2", 3)]
+                .iter()
+                .map(|(server, n)| row("  ", server, *n))
+                .collect();
+
+            // Languages are listed by name, reasons and servers by count, then name.
+            for expected in [
+                lang_rows,
+                format!("Non-cacheable reasons:\n{reason_rows}"),
+                format!("Successful distributed compiles\n{server_rows}"),
+            ] {
+                assert!(output.contains(&expected), "{expected:?} not in:\n{output}");
+            }
         }
     }
 }

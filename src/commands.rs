@@ -23,7 +23,7 @@ use crate::{
     mock_command::{CommandChild, CommandCreatorSync, ProcessCommandCreator, RunCommand},
     protocol::{Compile, CompileFinished, CompileResponse, Request, Response},
     server::{self, DistInfo, ServerInfo, ServerStartup, ServerStats},
-    util::{daemonize, new_client_runtime},
+    util::{self, daemonize, new_client_runtime},
 };
 use byteorder::{BigEndian, ByteOrder};
 use fs::{File, OpenOptions};
@@ -48,7 +48,6 @@ use tokio::{
     io::AsyncReadExt,
     runtime::{Builder, Runtime},
 };
-use which::which_in;
 
 /// The default sccache server port.
 pub const DEFAULT_PORT: u16 = 4226;
@@ -133,7 +132,7 @@ fn run_server_process(startup_timeout: Duration) -> Result<ServerStartup> {
         read_server_startup_status(socket).await
     };
 
-    runtime.block_on(async move {
+    util::block_on(&runtime, async move {
         match tokio::time::timeout(startup_timeout, startup).await {
             Ok(result) => result,
             Err(_elapsed) => Ok(ServerStartup::TimedOut),
@@ -324,7 +323,7 @@ fn run_server_process(startup_timeout: Duration) -> Result<ServerStartup> {
         read_server_startup_status(socket?).await
     };
 
-    runtime.block_on(async move {
+    util::block_on(&runtime, async move {
         match tokio::time::timeout(startup_timeout, startup).await {
             Ok(result) => result,
             Err(_elapsed) => Ok(ServerStartup::TimedOut),
@@ -647,7 +646,7 @@ where
 
     trace!("running command: {cmd}");
 
-    let status = runtime.block_on(async move {
+    let status = util::block_on(runtime, async move {
         let child = cmd.spawn().await?;
         child
             .wait()
@@ -688,7 +687,7 @@ where
     T: CommandCreatorSync,
 {
     trace!("do_compile");
-    let exe_path = which_in(exe, path, cwd)?;
+    let exe_path = crate::util::which_in(exe.as_os_str(), path.as_deref(), cwd)?;
     let res = request_compile(&mut conn, &exe_path, &cmdline, cwd, env_vars)?;
     handle_compile_response(
         creator,
@@ -726,7 +725,7 @@ where
     C: CommandCreatorSync + Clone + Send + Sync + 'static,
 {
     trace!("do_compile_client_side");
-    let exe_path = which_in(exe, path, cwd)?;
+    let exe_path = crate::util::which_in(exe.as_os_str(), path.as_deref(), cwd)?;
     let conn = Arc::new(std::sync::Mutex::new(conn));
     let storage = IpcStorage::connect(conn.clone())?;
     let (tx, _rx) = futures::channel::mpsc::channel(1);
@@ -747,7 +746,7 @@ where
         args: cmdline.clone(),
         env_vars,
     };
-    let (compile_resp, finished) = runtime.block_on(service.compile_direct(compile))?;
+    let (compile_resp, finished) = util::block_on(runtime, service.compile_direct(compile))?;
     let creator = C::new(jobserver);
     let exit_code = handle_compile_result(
         creator,
@@ -761,7 +760,7 @@ where
         stderr,
     )?;
     // Ship accumulated stats back to the daemon (best-effort; don't fail the build on error).
-    let delta: ServerStats = runtime.block_on(service.take_stats());
+    let delta: ServerStats = util::block_on(runtime, service.take_stats());
     if let Ok(mut conn) = conn.lock() {
         let _ = conn.request(Request::RecordStats(Box::new(delta)));
     }
@@ -790,7 +789,7 @@ pub fn run_command(cmd: Command) -> Result<i32> {
                 // anyways, so we can just return (mostly) empty stats directly.
                 Err(_) => {
                     let runtime = new_client_runtime()?;
-                    runtime.block_on(async {
+                    util::block_on(&runtime, async {
                         let compilations_storage = StorageKind::Compilations
                             .create(&config.cache, &config.basedirs)
                             .await?;
@@ -811,7 +810,7 @@ pub fn run_command(cmd: Command) -> Result<i32> {
             trace!("Command::DebugDependenciesCacheEntries");
             let config = ClientConfig::load()?;
             let runtime = Runtime::new()?;
-            runtime.block_on(async {
+            util::block_on(&runtime, async {
                 let storage = StorageKind::Compilations
                     .create(&config.cache, &config.basedirs)
                     .await?;
@@ -986,7 +985,7 @@ pub fn run_command(cmd: Command) -> Result<i32> {
             let cwd = env::current_dir().expect("A current working dir should exist");
 
             let pool = runtime.handle().clone();
-            runtime.block_on(async move {
+            util::block_on(&runtime, async move {
                 let packaged =
                     crate::compiler::get_compiler_info(creator, &exe, &cwd, &[], &env, &pool, None)
                         .await?
@@ -1002,7 +1001,7 @@ pub fn run_command(cmd: Command) -> Result<i32> {
                     hash = packaged.compute_hash().await?
                 );
 
-                tokio::task::block_in_place(|| packaged.write_tar_gz(&mut out_file))
+                crate::util::block_in_place(&mut || packaged.write_tar_gz(&mut out_file))
             })?;
         }
         #[cfg(not(feature = "dist-client"))]

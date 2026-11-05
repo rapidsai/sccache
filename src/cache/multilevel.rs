@@ -403,7 +403,7 @@ impl MultiLevelStorage {
             let level = Arc::clone(level);
             let stats_arc = self.atomic_stats.get(idx).map(Arc::clone);
 
-            tokio::spawn(async move {
+            crate::util::spawn_detached(async move {
                 let start = Instant::now();
                 match Self::write_entry_from_bytes(&level, &key, data).await {
                     Ok(_) => {
@@ -464,7 +464,7 @@ impl Storage for MultiLevelStorage {
                             let level_bf = Arc::clone(&self.levels[backfill_idx]);
                             let stats_arc = self.atomic_stats.get(backfill_idx).map(Arc::clone);
 
-                            tokio::spawn(async move {
+                            crate::util::spawn_detached(async move {
                                 match Self::write_entry_from_bytes(&level_bf, &key_bf, bytes_bf)
                                     .await
                                 {
@@ -509,7 +509,7 @@ impl Storage for MultiLevelStorage {
 
     async fn del(&self, key: &str) -> Result<()> {
         let futures = self.levels.iter().map(|s| s.del(key).boxed());
-        futures::future::try_join_all(futures).await?;
+        crate::util::try_join_all(futures).await?;
         Ok(())
     }
 
@@ -604,7 +604,7 @@ impl Storage for MultiLevelStorage {
                         }
                     } else {
                         // L1+ async
-                        tokio::spawn(async move {
+                        crate::util::spawn_detached(async move {
                             let result = write_task.await;
                             let _ = tx.send(result).await;
                         });

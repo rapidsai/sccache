@@ -43,14 +43,13 @@ use std::{
     sync::{Arc, LazyLock},
     time::Duration,
 };
-use which::which_in;
 
 static HAS_SM_IN_NAME_RE: LazyLock<Regex> =
-    LazyLock::new(|| regex_static::regex!(r"^(.*)\.sm_([0-9A-Za-z]+)\.(.*)$"));
+    LazyLock::new(|| Regex::new(r"^(.*)\.sm_([0-9A-Za-z]+)\.(.*)$").unwrap());
 static HAS_COMPUTE_IN_NAME_RE: LazyLock<Regex> =
-    LazyLock::new(|| regex_static::regex!(r"^(.*)\.compute_([0-9A-Za-z]+)\.(.*)$"));
+    LazyLock::new(|| Regex::new(r"^(.*)\.compute_([0-9A-Za-z]+)\.(.*)$").unwrap());
 static ARG_HAS_FILE_WITH_EXTENSION_RE: LazyLock<Regex> =
-    LazyLock::new(|| regex_static::regex!(r"-.*=(.*)"));
+    LazyLock::new(|| Regex::new(r"-.*=(.*)").unwrap());
 
 static NVCC_TMPDIR: LazyLock<std::result::Result<PathBuf, std::io::Error>> = LazyLock::new(|| {
     SCCACHE_TMPDIR
@@ -137,12 +136,11 @@ impl Nvcc {
         let pragma_once_fix = Arc::new(if matches!(host_compiler, NvccHostCompiler::Gcc) {
             crate::compiler::util::build_gcc_pragma_once_fix(
                 executable.as_ref(),
-                [
+                &[
                     OsStr::new("-allow-unsupported-compiler"),
                     OsStr::new("-forward-unknown-to-host-compiler"),
-                ]
-                .into_iter(),
-                env_vars.iter().cloned(),
+                ],
+                &env_vars,
             )
             .await
             .unwrap_or_else(|_| PathBuf::new())
@@ -338,7 +336,7 @@ impl Nvcc {
             host_compiler,
             &mut nvcc_internal_files,
             Path::new("x.cu.o"),
-            |exe, _| exe == "ptxas",
+            &|exe, _| exe == "ptxas",
         )
         .await?
         .into_iter()
@@ -412,7 +410,7 @@ impl Nvcc {
                 host_compiler,
                 &mut nvcc_internal_files,
                 Path::new("x.cu.o"),
-                is_nvcc_exe,
+                &is_nvcc_exe,
             )
             .await
             .map(|cmds| {
@@ -640,22 +638,7 @@ impl CCompilerImpl for Nvcc {
             executable,
             parsed_args,
             cwd,
-            [("LD_PRELOAD".into(), "".into())]
-                .iter()
-                .chain(env_vars.iter())
-                .cloned()
-                .map(|(key, mut val)| {
-                    //
-                    if key == "LD_PRELOAD" {
-                        if !val.is_empty() {
-                            val.push(":");
-                        }
-                        if !self.pragma_once_fix.as_os_str().is_empty() {
-                            val.push(self.pragma_once_fix.as_os_str());
-                        }
-                    }
-                    (key, val)
-                }),
+            &gcc::env_with_pragma_once_fix(env_vars, &self.pragma_once_fix),
             self.kind(),
             tolerate_failure,
         )
@@ -980,7 +963,7 @@ impl CompileCommandImpl for NvccCompileCommand {
                 let src_dir = out_dir.as_ref().path();
 
                 // Ensure `--keep-dir` exists
-                tokio::fs::create_dir_all(dst_dir).await?;
+                crate::util::async_fs::create_dir_all(dst_dir).await?;
 
                 // Rename files back to original nvcc names
                 for (old, new) in nvcc_internal_files.drain() {
@@ -988,12 +971,12 @@ impl CompileCommandImpl for NvccCompileCommand {
                     let dst = dst_dir.join(old);
                     if dst != src
                         && src.exists()
-                        && let Err(err) = tokio::fs::rename(&src, &dst).await
+                        && let Err(err) = crate::util::async_fs::rename(&src, &dst).await
                     {
                         match err.kind() {
                             std::io::ErrorKind::CrossesDevices => {
-                                tokio::fs::copy(&src, &dst).await?;
-                                tokio::fs::remove_file(&src).await?;
+                                crate::util::async_fs::copy(&src, &dst).await?;
+                                crate::util::async_fs::remove_file(&src).await?;
                             }
                             _ => bail!(err),
                         }
@@ -1010,7 +993,7 @@ impl CompileCommandImpl for NvccCompileCommand {
                     .flat_map(|(old, new)| [obj_dir.join(old), obj_dir.join(new)])
                     .filter(|path| path.exists())
                 {
-                    tokio::fs::remove_file(path).await?;
+                    crate::util::async_fs::remove_file(path).await?;
                 }
             }
 
@@ -1028,7 +1011,7 @@ impl CompileCommandImpl for NvccCompileCommand {
         let run_command_groups =
             |mut output: ProcessOutput, chunks: Vec<Vec<Vec<NvccGeneratedSubcommand>>>| async {
                 for chunk in chunks {
-                    let results = futures::future::join_all(chunk.into_iter().map(|commands| {
+                    let results = crate::util::join_all(chunk.into_iter().map(|commands| {
                         run_nvcc_subcommands_group(
                             service,
                             creator,
@@ -1201,7 +1184,7 @@ where
         host_compiler,
         &mut nvcc_internal_files,
         output_path,
-        is_nvcc_exe,
+        &is_nvcc_exe,
     )
     .await?;
 
@@ -1216,7 +1199,7 @@ where
         host_compiler,
         &mut nvcc_internal_files,
         output_path,
-        |exe, args| !is_nvcc_exe(exe, args),
+        &|exe, args| !is_nvcc_exe(exe, args),
     )
     .await?;
 
@@ -1720,7 +1703,7 @@ fn fixup_cicc_args(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn select_nvcc_subcommands<T, F>(
+async fn select_nvcc_subcommands<T>(
     creator: &T,
     executable: &Path,
     cwd: &Path,
@@ -1730,10 +1713,9 @@ async fn select_nvcc_subcommands<T, F>(
     host_compiler: &NvccHostCompiler,
     nvcc_internal_files: &mut HashMap<String, String>,
     output_path: &Path,
-    select_subcommand: F,
+    select_subcommand: &(dyn Fn(&str, &[String]) -> bool + Sync),
 ) -> Result<Vec<(usize, PathBuf, Vec<String>)>>
 where
-    F: Fn(&str, &[String]) -> bool,
     T: CommandCreatorSync,
 {
     let mut nvcc_dryrun_cmd = creator.clone().new_command_sync(executable);
@@ -1786,18 +1768,15 @@ where
     )
 }
 
-fn parse_nvcc_subcommands<F>(
+fn parse_nvcc_subcommands(
     cwd: &Path,
     env_vars: &mut Vec<(OsString, OsString)>,
     compile_flag: &NvccCompileFlag,
     host_compiler: &NvccHostCompiler,
     nvcc_internal_files: &mut HashMap<String, String>,
-    select_subcommand: F,
+    select_subcommand: &dyn Fn(&str, &[String]) -> bool,
     lines: &str,
-) -> Result<Vec<(usize, PathBuf, Vec<String>)>>
-where
-    F: Fn(&str, &[String]) -> bool,
-{
+) -> Result<Vec<(usize, PathBuf, Vec<String>)>> {
     let mut new_vars = HashMap::<String, (String, String)>::new();
 
     let lines = lines
@@ -2002,7 +1981,8 @@ fn fold_env_vars_or_split_into_exe_and_args(
                 .map(|(_, v)| v.as_os_str())
         });
 
-    let exe = which_in(&exe, env_path, cwd).unwrap_or_else(|_| PathBuf::from(exe));
+    let exe = crate::util::which_in(OsStr::new(&exe), env_path, cwd)
+        .unwrap_or_else(|_| PathBuf::from(exe));
 
     // Remove any shell stdio redirect arguments
     let (_, args) = args
@@ -2439,7 +2419,7 @@ where
             // Move nvcc internal files to `--keep-dir`, but only if it isn't the same as `out_dir`
             if let Some(dst_dir) = keep_dir {
                 // Ensure `--keep-dir` exists
-                tokio::fs::create_dir_all(dst_dir).await?;
+                crate::util::async_fs::create_dir_all(dst_dir).await?;
 
                 // Rename files back to original nvcc names
                 for (old, new) in inputs_to_delete_after_completion {
@@ -2447,12 +2427,12 @@ where
                     let dst = dst_dir.join(old);
                     if dst != src
                         && src.exists()
-                        && let Err(err) = tokio::fs::rename(&src, &dst).await
+                        && let Err(err) = crate::util::async_fs::rename(&src, &dst).await
                     {
                         match err.kind() {
                             std::io::ErrorKind::CrossesDevices => {
-                                tokio::fs::copy(&src, &dst).await?;
-                                tokio::fs::remove_file(&src).await?;
+                                crate::util::async_fs::copy(&src, &dst).await?;
+                                crate::util::async_fs::remove_file(&src).await?;
                             }
                             _ => bail!(err),
                         }
@@ -2463,11 +2443,11 @@ where
                 for (old, new) in inputs_to_delete_after_completion {
                     let old = obj_dir.join(old);
                     if old.exists() {
-                        tokio::fs::remove_file(old).await?;
+                        crate::util::async_fs::remove_file(old).await?;
                     }
                     let new = obj_dir.join(new);
                     if new.exists() {
-                        tokio::fs::remove_file(new).await?;
+                        crate::util::async_fs::remove_file(new).await?;
                     }
                 }
             }
@@ -3616,7 +3596,7 @@ mod test {
             compile_flag,
             host_compiler,
             &mut nvcc_internal_files,
-            is_nvcc_exe,
+            &is_nvcc_exe,
             // nvcc -rdc=true -gencode=arch=lto_75,code=lto_75 -dc x.cu -o x.ltoir.o --dryrun --keep
             r#"
 #$ gcc -D__CUDA_ARCH_LIST__=750 -E -x c++ -D__CUDACC__ -D__NVCC__ -D__CUDACC_RDC__  "-I/usr/local/cuda/bin/../targets/x86_64-linux/include"   "-isystem" "/usr/local/cuda/bin/../targets/x86_64-linux/include/cccl"    -D__CUDACC_VER_MAJOR__=13 -D__CUDACC_VER_MINOR__=2 -D__CUDACC_VER_BUILD__=78 -D__CUDA_API_VER_MAJOR__=13 -D__CUDA_API_VER_MINOR__=2 -D__NVCC_DIAG_PRAGMA_SUPPORT__=1 -D__CUDACC_DEVICE_ATOMIC_BUILTINS__=1 -include "cuda_runtime.h" -m64 "x.cu" -o "x.cpp4.ii"
@@ -3634,7 +3614,7 @@ mod test {
             compile_flag,
             host_compiler,
             &mut nvcc_internal_files,
-            |exe, args| !is_nvcc_exe(exe, args),
+            &|exe, args| !is_nvcc_exe(exe, args),
             // nvcc -rdc=true -gencode=arch=lto_75,code=lto_75 -dc x.cu -o x.ltoir.o --dryrun --keep --keep-dir /tmp/out
             r#"
 #$ gcc -D__CUDA_ARCH_LIST__=750 -E -x c++ -D__CUDACC__ -D__NVCC__ -D__CUDACC_RDC__  "-I/usr/local/cuda/bin/../targets/x86_64-linux/include"   "-isystem" "/usr/local/cuda/bin/../targets/x86_64-linux/include/cccl"    -D__CUDACC_VER_MAJOR__=13 -D__CUDACC_VER_MINOR__=2 -D__CUDACC_VER_BUILD__=78 -D__CUDA_API_VER_MAJOR__=13 -D__CUDA_API_VER_MINOR__=2 -D__NVCC_DIAG_PRAGMA_SUPPORT__=1 -D__CUDACC_DEVICE_ATOMIC_BUILTINS__=1 -include "cuda_runtime.h" -m64 "x.cu" -o "/tmp/out/x.cpp4.ii"
@@ -3681,7 +3661,7 @@ mod test {
             &NvccCompileFlag::Device,
             &NvccHostCompiler::Gcc,
             &mut nvcc_internal_files,
-            |_, _| true,
+            &|_, _| true,
             // echo | nvcc -c -x cu --enable-tile - -o /tmp/x/x.cu.o --dryrun --keep --keep-dir /tmp/out
             r#"
 #$ gcc -D__NV_TL__=__tile__ -D__NV_TL_BUILTIN__=__tile_builtin__ -D__CUDACC_TILE__=1 -D__CUDA_ARCH_LIST__=750 -E -x c++ -D__CUDACC__ -D__NVCC__  "-I/usr/local/cuda/bin/../targets/x86_64-linux/include"   "-isystem" "/usr/local/cuda/bin/../targets/x86_64-linux/include/cccl"    -D__CUDACC_VER_MAJOR__=13 -D__CUDACC_VER_MINOR__=4 -D__CUDACC_VER_BUILD__=0 -D__CUDA_API_VER_MAJOR__=13 -D__CUDA_API_VER_MINOR__=4 -D__NVCC_DIAG_PRAGMA_SUPPORT__=1 -D__CUDACC_DEVICE_ATOMIC_BUILTINS__=1 -include "cuda_runtime.h" -m64 "/tmp/tmpxft_00000080_00000000-1_stdin" -o "/tmp/out/tmpxft_00000080_00000000-1_stdin.cpp4.ii"
@@ -3730,7 +3710,7 @@ mod test {
             compile_flag,
             host_compiler,
             &mut nvcc_internal_files,
-            is_nvcc_exe,
+            &is_nvcc_exe,
             // nvcc -x cu --enable-tile  -gencode=arch=compute_80,code=[compute_80,sm_80] -gencode=arch=compute_86,code=[compute_86,sm_86] -c x.cu -o x.cu.o --dryrun --keep
             r#"
 #$ gcc -D__NV_TL__=__tile__ -D__NV_TL_BUILTIN__=__tile_builtin__ -D__CUDACC_TILE__=1 -D__CUDA_ARCH_LIST__=800,860 -E -x c++ -D__CUDACC__ -D__NVCC__  "-I/usr/local/cuda/bin/../targets/x86_64-linux/include"   "-isystem" "/usr/local/cuda/bin/../targets/x86_64-linux/include/cccl"    -D__CUDACC_VER_MAJOR__=13 -D__CUDACC_VER_MINOR__=4 -D__CUDACC_VER_BUILD__=0 -D__CUDA_API_VER_MAJOR__=13 -D__CUDA_API_VER_MINOR__=4 -D__NVCC_DIAG_PRAGMA_SUPPORT__=1 -D__CUDACC_DEVICE_ATOMIC_BUILTINS__=1 -include "cuda_runtime.h" -m64 "x.cu" -o "x.cpp4.ii"
@@ -3756,7 +3736,7 @@ mod test {
             compile_flag,
             host_compiler,
             &mut nvcc_internal_files,
-            |exe, args| !is_nvcc_exe(exe, args),
+            &|exe, args| !is_nvcc_exe(exe, args),
             // nvcc -x cu --enable-tile  -gencode=arch=compute_80,code=[compute_80,sm_80] -gencode=arch=compute_86,code=[compute_86,sm_86] -c x.cu -o x.cu.o --dryrun --keep --keep-dir /tmp/out
             r#"
 #$ gcc -D__NV_TL__=__tile__ -D__NV_TL_BUILTIN__=__tile_builtin__ -D__CUDACC_TILE__=1 -D__CUDA_ARCH_LIST__=800,860 -E -x c++ -D__CUDACC__ -D__NVCC__  "-I/usr/local/cuda/bin/../targets/x86_64-linux/include"   "-isystem" "/usr/local/cuda/bin/../targets/x86_64-linux/include/cccl"    -D__CUDACC_VER_MAJOR__=13 -D__CUDACC_VER_MINOR__=4 -D__CUDACC_VER_BUILD__=0 -D__CUDA_API_VER_MAJOR__=13 -D__CUDA_API_VER_MINOR__=4 -D__NVCC_DIAG_PRAGMA_SUPPORT__=1 -D__CUDACC_DEVICE_ATOMIC_BUILTINS__=1 -include "cuda_runtime.h" -m64 "x.cu" -o "/tmp/out/x.cpp4.ii"

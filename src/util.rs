@@ -48,6 +48,7 @@ use std::{
     str,
     sync::{Arc, LazyLock},
     time::{self, Duration, SystemTime},
+    unreachable,
 };
 use tokio_retry2::Retry;
 use tokio_retry2::strategy::FibonacciBackoff;
@@ -71,21 +72,13 @@ impl Digest {
         }
     }
 
-    fn open_file<T>(path: T) -> Result<BufReader<AllowStdIo<fs::File>>>
-    where
-        T: AsRef<Path>,
-    {
-        let path = path.as_ref();
+    fn open_file(path: &Path) -> Result<BufReader<AllowStdIo<fs::File>>> {
         let file = fs::File::open(path)
             .with_context(|| format!("Failed to open file for hashing: {path:?}"))?;
         Ok(BufReader::new(AllowStdIo::new(file)))
     }
 
-    fn open_file_sync<T>(path: T) -> Result<std::io::BufReader<fs::File>>
-    where
-        T: AsRef<Path>,
-    {
-        let path = path.as_ref();
+    fn open_file_sync(path: &Path) -> Result<std::io::BufReader<fs::File>> {
         let file = fs::File::open(path)
             .with_context(|| format!("Failed to open file for hashing: {path:?}"))?;
         Ok(std::io::BufReader::new(file))
@@ -96,7 +89,7 @@ impl Digest {
     where
         T: AsRef<Path>,
     {
-        Self::new().with_file(path).await
+        Self::new().with_file(path.as_ref()).await
     }
 
     /// Calculate the BLAKE3 digest of the contents of `path`.
@@ -104,19 +97,16 @@ impl Digest {
     where
         T: AsRef<Path>,
     {
-        Self::new().with_file_sync(path)
+        Self::new().with_file_sync(path.as_ref())
     }
 
     /// Calculate the BLAKE3 digest of the contents of `path`, while
     /// also checking for the presence of time macros.
     /// See [`TimeMacroFinder`] for more details.
-    pub async fn from_file_with_macro_finders<T>(
-        path: T,
+    pub async fn from_file_with_macro_finders(
+        path: &Path,
         compile_timestamp: chrono::DateTime<chrono::Utc>,
-    ) -> Result<(Self, TimeMacroFinder, HiddenIncludesFinder)>
-    where
-        T: AsRef<Path>,
-    {
+    ) -> Result<(Self, TimeMacroFinder, HiddenIncludesFinder)> {
         Self::new()
             .with_file_and_macro_finders(path, compile_timestamp)
             .await
@@ -125,13 +115,10 @@ impl Digest {
     /// Calculate the BLAKE3 digest of the contents of `path`, while
     /// also checking for the presence of time macros.
     /// See [`TimeMacroFinder`] for more details.
-    pub fn from_file_with_macro_finders_sync<T>(
-        path: T,
+    pub fn from_file_with_macro_finders_sync(
+        path: &Path,
         compile_timestamp: chrono::DateTime<chrono::Utc>,
-    ) -> Result<(Self, TimeMacroFinder, HiddenIncludesFinder)>
-    where
-        T: AsRef<Path>,
-    {
+    ) -> Result<(Self, TimeMacroFinder, HiddenIncludesFinder)> {
         Self::new().with_file_and_macro_finders_sync(path, compile_timestamp)
     }
 
@@ -164,11 +151,7 @@ impl Digest {
     }
 
     /// Update the BLAKE3 digest of the contents of `path` into this digest.
-    pub async fn with_file<T>(self, path: T) -> Result<Self>
-    where
-        T: AsRef<Path>,
-    {
-        let path = path.as_ref();
+    pub async fn with_file(self, path: &Path) -> Result<Self> {
         if path.is_dir() {
             // For directories (e.g., from
             // proc_macro::tracked_path::path()), recursively hash all file
@@ -190,11 +173,7 @@ impl Digest {
     }
 
     /// Update the BLAKE3 digest of the contents of `path` into this digest.
-    pub fn with_file_sync<T>(self, path: T) -> Result<Self>
-    where
-        T: AsRef<Path>,
-    {
-        let path = path.as_ref();
+    pub fn with_file_sync(self, path: &Path) -> Result<Self> {
         if path.is_dir() {
             // For directories (e.g., from
             // proc_macro::tracked_path::path()), recursively hash all file
@@ -218,17 +197,12 @@ impl Digest {
     /// Update the BLAKE3 digest of the contents of `path` into this digest, while
     /// also checking for the presence of time macros.
     /// See [`TimeMacroFinder`] for more details.
-    pub async fn with_file_and_macro_finders<T>(
+    pub async fn with_file_and_macro_finders(
         self,
-        path: T,
+        path: &Path,
         compile_timestamp: chrono::DateTime<chrono::Utc>,
-    ) -> Result<(Self, TimeMacroFinder, HiddenIncludesFinder)>
-    where
-        T: AsRef<Path>,
-    {
+    ) -> Result<(Self, TimeMacroFinder, HiddenIncludesFinder)> {
         use chrono::Datelike;
-
-        let path = path.as_ref();
 
         let (mut digest, time_finder, hinc_finder) = self
             .with_reader_and_macro_finders(Self::open_file(path)?)
@@ -250,7 +224,7 @@ impl Digest {
 
         if time_finder.found_timestamp() {
             debug!("found __TIMESTAMP__ in {path:?}");
-            let mtime: chrono::DateTime<chrono::Local> = tokio::fs::symlink_metadata(path)
+            let mtime: chrono::DateTime<chrono::Local> = async_fs::symlink_metadata(path)
                 .await
                 .with_context(|| format!("Failed to read file metadata for hashing: {path:?}"))?
                 .modified()
@@ -267,17 +241,12 @@ impl Digest {
     /// Update the BLAKE3 digest of the contents of `path` into this digest, while
     /// also checking for the presence of time macros.
     /// See [`TimeMacroFinder`] for more details.
-    pub fn with_file_and_macro_finders_sync<T>(
+    pub fn with_file_and_macro_finders_sync(
         self,
-        path: T,
+        path: &Path,
         compile_timestamp: chrono::DateTime<chrono::Utc>,
-    ) -> Result<(Self, TimeMacroFinder, HiddenIncludesFinder)>
-    where
-        T: AsRef<Path>,
-    {
+    ) -> Result<(Self, TimeMacroFinder, HiddenIncludesFinder)> {
         use chrono::Datelike;
-
-        let path = path.as_ref();
 
         let (mut digest, time_finder, hinc_finder) =
             self.with_reader_and_macro_finders_sync(Self::open_file_sync(path)?)?;
@@ -632,11 +601,11 @@ pub fn hex(bytes: &[u8]) -> String {
 /// `pool`.
 pub async fn hash_all<T>(files: &[T]) -> Result<Vec<String>>
 where
-    T: AsRef<Path>,
+    T: AsRef<Path> + Sync,
 {
     let start = time::Instant::now();
     let hashes =
-        futures::future::try_join_all(files.iter().map(|path| async move {
+        try_join_all(files.iter().map(|path| async move {
             Digest::from_file(path).await.map(|digest| digest.finish())
         }))
         .await?;
@@ -677,7 +646,7 @@ pub async fn hash_all_archives(
     let count = files.len();
     let iter = files.iter().map(|path| {
         let path = path.clone();
-        pool.spawn_blocking(move || -> Result<String> {
+        spawn_blocking_on(pool, move || -> Result<String> {
             let mut m = Digest::new();
             let archive_file = fs::File::open(&path)
                 .with_context(|| format!("Failed to open file for hashing: {path:?}"))?;
@@ -701,7 +670,7 @@ pub async fn hash_all_archives(
         })
     });
 
-    let mut hashes = futures::future::try_join_all(iter).await?;
+    let mut hashes = try_join_all(iter).await?;
     if let Some(i) = hashes.iter().position(|res| res.is_err()) {
         return Err(hashes.swap_remove(i).unwrap_err());
     }
@@ -1082,13 +1051,40 @@ where
     wait_with_input_buffer_stderr(child, input)
 }
 
+/// Serialize `value` to `writer`, producing the same bytes as `bincode::serialize_into`.
+///
+/// bincode's own functions also instantiate every `Serialize` impl for a size
+/// counting pass and for a limit check that is dead without a limit; going
+/// through this one serializer type keeps each message type to one instance.
+pub fn bincode_serialize_into<W, T>(writer: W, value: &T) -> bincode::Result<()>
+where
+    W: Write,
+    T: Serialize + ?Sized,
+{
+    use bincode::Options;
+    // The options `bincode::serialize` uses for its final pass, so any remaining
+    // callers of it share these instantiations.
+    let options = bincode::DefaultOptions::new()
+        .with_fixint_encoding()
+        .allow_trailing_bytes()
+        .with_no_limit();
+    value.serialize(&mut bincode::Serializer::new(writer, options))
+}
+
+/// Serialize `value`, producing the same bytes as `bincode::serialize`.
+pub fn bincode_serialize<T: Serialize + ?Sized>(value: &T) -> bincode::Result<Vec<u8>> {
+    let mut bytes = vec![];
+    bincode_serialize_into(&mut bytes, value)?;
+    Ok(bytes)
+}
+
 /// Write `data` to `writer` with bincode serialization, prefixed by a `u32` length.
 pub fn write_length_prefixed_bincode<W, S>(mut writer: W, data: S) -> Result<()>
 where
     W: Write,
     S: Serialize,
 {
-    let bytes = bincode::serialize(&data)?;
+    let bytes = bincode_serialize(&data)?;
     let mut len = [0; 4];
     BigEndian::write_u32(&mut len, bytes.len() as u32);
     writer.write_all(&len)?;
@@ -1864,23 +1860,407 @@ where
         .expect("http client must build with success")
 }
 
-pub fn spawn<F>(future: F) -> tokio_util::task::AbortOnDropHandle<F::Output>
+// tokio compiles its task harness (thousands of lines of IR, for both schedulers) for every
+// future or closure type it spawns, in every crate that spawns it. The helpers below box each
+// task and erase its output type, so that all tasks share one harness compiled in this crate,
+// and their handles downcast the output back to the type it was spawned with.
+type AnyOutput = Box<dyn std::any::Any + Send>;
+type AnyFuture = std::pin::Pin<Box<dyn Future<Output = AnyOutput> + Send>>;
+type AnyBlockingFn = Box<dyn FnOnce() -> AnyOutput + Send>;
+
+fn erase<F>(future: F) -> AnyFuture
 where
     F: Future + Send + 'static,
     F::Output: Send + 'static,
 {
-    tokio_util::task::AbortOnDropHandle::new(tokio::spawn(future))
+    Box::pin(async move { Box::new(future.await) as AnyOutput })
 }
 
-pub fn spawn_on<F>(
-    handle: &tokio::runtime::Handle,
-    future: F,
-) -> tokio_util::task::AbortOnDropHandle<F::Output>
+fn downcast<T: 'static>(output: AnyOutput) -> T {
+    *output
+        .downcast()
+        .expect("task output has the type it was spawned with")
+}
+
+#[track_caller]
+fn spawn_any(
+    handle: Option<&tokio::runtime::Handle>,
+    future: AnyFuture,
+) -> tokio::task::JoinHandle<AnyOutput> {
+    match handle {
+        Some(handle) => handle.spawn(future),
+        None => tokio::spawn(future),
+    }
+}
+
+#[track_caller]
+fn spawn_blocking_any(
+    handle: Option<&tokio::runtime::Handle>,
+    f: AnyBlockingFn,
+) -> tokio::task::JoinHandle<AnyOutput> {
+    match handle {
+        Some(handle) => handle.spawn_blocking(f),
+        None => tokio::task::spawn_blocking(f),
+    }
+}
+
+/// Like `tokio::task::JoinHandle`, dropping it detaches the task.
+pub struct JoinHandle<T> {
+    inner: tokio::task::JoinHandle<AnyOutput>,
+    output: std::marker::PhantomData<fn() -> T>,
+}
+
+impl<T> JoinHandle<T> {
+    fn new(inner: tokio::task::JoinHandle<AnyOutput>) -> Self {
+        Self {
+            inner,
+            output: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<T: 'static> Future for JoinHandle<T> {
+    type Output = std::result::Result<T, tokio::task::JoinError>;
+
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        std::pin::Pin::new(&mut self.inner)
+            .poll(cx)
+            .map_ok(downcast)
+    }
+}
+
+/// Like `tokio_util::task::AbortOnDropHandle`, dropping it aborts the task.
+#[must_use = "dropping the handle aborts the task immediately"]
+pub struct AbortOnDropHandle<T> {
+    inner: tokio_util::task::AbortOnDropHandle<AnyOutput>,
+    output: std::marker::PhantomData<fn() -> T>,
+}
+
+impl<T> AbortOnDropHandle<T> {
+    fn new(inner: tokio::task::JoinHandle<AnyOutput>) -> Self {
+        Self {
+            inner: tokio_util::task::AbortOnDropHandle::new(inner),
+            output: std::marker::PhantomData,
+        }
+    }
+
+    pub fn abort(&self) {
+        self.inner.abort();
+    }
+
+    pub fn detach(self) -> JoinHandle<T> {
+        JoinHandle::new(self.inner.detach())
+    }
+}
+
+impl<T: 'static> Future for AbortOnDropHandle<T> {
+    type Output = std::result::Result<T, tokio::task::JoinError>;
+
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        std::pin::Pin::new(&mut self.inner)
+            .poll(cx)
+            .map_ok(downcast)
+    }
+}
+
+#[track_caller]
+pub fn spawn<F>(future: F) -> AbortOnDropHandle<F::Output>
 where
     F: Future + Send + 'static,
     F::Output: Send + 'static,
 {
-    tokio_util::task::AbortOnDropHandle::new(handle.spawn(future))
+    AbortOnDropHandle::new(spawn_any(None, erase(future)))
+}
+
+#[track_caller]
+pub fn spawn_on<F>(handle: &tokio::runtime::Handle, future: F) -> AbortOnDropHandle<F::Output>
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    AbortOnDropHandle::new(spawn_any(Some(handle), erase(future)))
+}
+
+/// `tokio::spawn`: the task keeps running if the returned handle is dropped.
+#[track_caller]
+pub fn spawn_detached<F>(future: F) -> JoinHandle<F::Output>
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    JoinHandle::new(spawn_any(None, erase(future)))
+}
+
+/// `Handle::spawn`: the task keeps running if the returned handle is dropped.
+#[track_caller]
+pub fn spawn_detached_on<F>(handle: &tokio::runtime::Handle, future: F) -> JoinHandle<F::Output>
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    JoinHandle::new(spawn_any(Some(handle), erase(future)))
+}
+
+#[track_caller]
+pub fn spawn_blocking<F, R>(f: F) -> JoinHandle<R>
+where
+    F: FnOnce() -> R + Send + 'static,
+    R: Send + 'static,
+{
+    JoinHandle::new(spawn_blocking_any(
+        None,
+        Box::new(move || Box::new(f()) as AnyOutput),
+    ))
+}
+
+#[track_caller]
+pub fn spawn_blocking_on<F, R>(handle: &tokio::runtime::Handle, f: F) -> JoinHandle<R>
+where
+    F: FnOnce() -> R + Send + 'static,
+    R: Send + 'static,
+{
+    JoinHandle::new(spawn_blocking_any(
+        Some(handle),
+        Box::new(move || Box::new(f()) as AnyOutput),
+    ))
+}
+
+/// `tokio::task::block_in_place`, behind one instantiation shared by every caller.
+#[track_caller]
+pub fn block_in_place(f: &mut dyn FnMut() -> Result<()>) -> Result<()> {
+    tokio::task::block_in_place(f)
+}
+
+// `Runtime::block_on` and `Handle::block_on` compile tokio's whole `block_on` path, for both
+// schedulers, for every future type. These hand every future to them as a boxed future that
+// stores its output in a local, so all callers share one instantiation compiled in this crate.
+
+#[track_caller]
+pub fn block_on<F: Future>(runtime: &tokio::runtime::Runtime, future: F) -> F::Output {
+    let mut output = None;
+    block_on_unit(runtime, Box::pin(async { output = Some(future.await) }));
+    output.expect("block_on returned before its future completed")
+}
+
+#[track_caller]
+fn block_on_unit(
+    runtime: &tokio::runtime::Runtime,
+    future: std::pin::Pin<Box<dyn Future<Output = ()> + '_>>,
+) {
+    runtime.block_on(future);
+}
+
+#[track_caller]
+pub fn block_on_handle<F: Future>(handle: &tokio::runtime::Handle, future: F) -> F::Output {
+    let mut output = None;
+    block_on_handle_unit(handle, Box::pin(async { output = Some(future.await) }));
+    output.expect("block_on returned before its future completed")
+}
+
+#[track_caller]
+fn block_on_handle_unit(
+    handle: &tokio::runtime::Handle,
+    future: std::pin::Pin<Box<dyn Future<Output = ()> + '_>>,
+) {
+    handle.block_on(future);
+}
+
+// `futures::future::join_all` and `try_join_all` compile their combinators (`FuturesOrdered`,
+// `FuturesUnordered` and the rest) for every future type they are given. These wrappers box
+// each future to store its output in a slot of its own and report only whether it failed, so
+// one `try_join_all` instantiation, compiled in this crate, serves every caller. `futures`
+// picks its strategy, which decides polling and short-circuiting, from the iterator's size
+// hint, so the boxed futures carry the caller's iterator's upper bound. The wrappers use plain
+// loops because `collect` would compile its own machinery for every output type.
+type JoinFuture<'a> = futures::future::BoxFuture<'a, std::result::Result<(), usize>>;
+
+struct JoinFutures<'a> {
+    futures: std::vec::IntoIter<JoinFuture<'a>>,
+    upper: Option<usize>,
+}
+
+impl<'a> Iterator for JoinFutures<'a> {
+    type Item = JoinFuture<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.futures.next()
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.futures.len(), self.upper)
+    }
+}
+
+fn join_boxed(
+    futures: Vec<JoinFuture<'_>>,
+    upper: Option<usize>,
+) -> futures::future::BoxFuture<'_, std::result::Result<Vec<()>, usize>> {
+    Box::pin(futures::future::try_join_all(JoinFutures {
+        futures: futures.into_iter(),
+        upper,
+    }))
+}
+
+/// `futures::future::join_all`, for `Send` futures.
+pub fn join_all<I, F>(futures: I) -> impl Future<Output = Vec<F::Output>>
+where
+    I: IntoIterator<Item = F>,
+    F: Future + Send,
+    F::Output: Send,
+{
+    let futures = futures.into_iter();
+    let upper = futures.size_hint().1;
+    let futures: Vec<F> = futures.collect();
+    async move {
+        let mut outputs = Vec::with_capacity(futures.len());
+        for _ in 0..futures.len() {
+            outputs.push(None);
+        }
+        let mut joined = Vec::with_capacity(futures.len());
+        for (future, output) in futures.into_iter().zip(&mut outputs) {
+            joined.push(Box::pin(async move {
+                *output = Some(future.await);
+                Ok(())
+            }) as JoinFuture<'_>);
+        }
+        join_boxed(joined, upper)
+            .await
+            .expect("join_all futures don't fail");
+        let mut results = Vec::with_capacity(outputs.len());
+        for output in outputs {
+            results.push(output.expect("join_all completed every future"));
+        }
+        results
+    }
+}
+
+/// `futures::future::try_join_all`, for `Send` futures.
+pub fn try_join_all<I, F, T, E>(futures: I) -> impl Future<Output = std::result::Result<Vec<T>, E>>
+where
+    I: IntoIterator<Item = F>,
+    F: Future<Output = std::result::Result<T, E>> + Send,
+    T: Send,
+    E: Send,
+{
+    let futures = futures.into_iter();
+    let upper = futures.size_hint().1;
+    let futures: Vec<F> = futures.collect();
+    async move {
+        let mut outputs = Vec::with_capacity(futures.len());
+        for _ in 0..futures.len() {
+            outputs.push(None);
+        }
+        let mut joined = Vec::with_capacity(futures.len());
+        for (index, (future, output)) in futures.into_iter().zip(&mut outputs).enumerate() {
+            joined.push(Box::pin(async move {
+                let result = future.await;
+                let failed = result.is_err();
+                *output = Some(result);
+                if failed { Err(index) } else { Ok(()) }
+            }) as JoinFuture<'_>);
+        }
+        match join_boxed(joined, upper).await {
+            Ok(_) => {
+                let mut values = Vec::with_capacity(outputs.len());
+                for output in outputs {
+                    match output {
+                        Some(Ok(value)) => values.push(value),
+                        _ => unreachable!("try_join_all completed every future"),
+                    }
+                }
+                Ok(values)
+            }
+            Err(index) => match outputs.swap_remove(index) {
+                Some(Err(err)) => Err(err),
+                _ => unreachable!("try_join_all stopped at a failed future"),
+            },
+        }
+    }
+}
+
+/// The `tokio::fs` functions sccache uses. They make the same `std::fs` calls as tokio on the
+/// blocking pool, but through `spawn_blocking` above, so they don't each compile their own
+/// blocking task harness.
+pub mod async_fs {
+    use std::{fs, io, path::Path};
+
+    async fn asyncify<F, T>(f: F) -> io::Result<T>
+    where
+        F: FnOnce() -> io::Result<T> + Send + 'static,
+        T: Send + 'static,
+    {
+        match super::spawn_blocking(f).await {
+            Ok(res) => res,
+            Err(_) => Err(io::Error::other("background task failed")),
+        }
+    }
+
+    pub async fn copy(from: impl AsRef<Path>, to: impl AsRef<Path>) -> io::Result<u64> {
+        let from = from.as_ref().to_owned();
+        let to = to.as_ref().to_owned();
+        asyncify(move || fs::copy(from, to)).await
+    }
+
+    pub async fn create(path: impl AsRef<Path>) -> io::Result<tokio::fs::File> {
+        let path = path.as_ref().to_owned();
+        asyncify(move || fs::File::create(path))
+            .await
+            .map(tokio::fs::File::from_std)
+    }
+
+    pub async fn create_dir_all(path: impl AsRef<Path>) -> io::Result<()> {
+        let path = path.as_ref().to_owned();
+        asyncify(move || fs::create_dir_all(path)).await
+    }
+
+    pub async fn open(path: impl AsRef<Path>) -> io::Result<tokio::fs::File> {
+        let path = path.as_ref().to_owned();
+        asyncify(move || fs::File::open(path))
+            .await
+            .map(tokio::fs::File::from_std)
+    }
+
+    pub async fn read(path: impl AsRef<Path>) -> io::Result<Vec<u8>> {
+        let path = path.as_ref().to_owned();
+        asyncify(move || fs::read(path)).await
+    }
+
+    pub async fn read_to_string(path: impl AsRef<Path>) -> io::Result<String> {
+        let path = path.as_ref().to_owned();
+        asyncify(move || fs::read_to_string(path)).await
+    }
+
+    pub async fn remove_dir_all(path: impl AsRef<Path>) -> io::Result<()> {
+        let path = path.as_ref().to_owned();
+        asyncify(move || fs::remove_dir_all(path)).await
+    }
+
+    pub async fn remove_file(path: impl AsRef<Path>) -> io::Result<()> {
+        let path = path.as_ref().to_owned();
+        asyncify(move || fs::remove_file(path)).await
+    }
+
+    pub async fn rename(from: impl AsRef<Path>, to: impl AsRef<Path>) -> io::Result<()> {
+        let from = from.as_ref().to_owned();
+        let to = to.as_ref().to_owned();
+        asyncify(move || fs::rename(from, to)).await
+    }
+
+    pub async fn symlink_metadata(path: impl AsRef<Path>) -> io::Result<fs::Metadata> {
+        let path = path.as_ref().to_owned();
+        asyncify(move || fs::symlink_metadata(path)).await
+    }
+
+    pub async fn try_exists(path: impl AsRef<Path>) -> io::Result<bool> {
+        let path = path.as_ref().to_owned();
+        asyncify(move || path.try_exists()).await
+    }
 }
 
 fn unhex(b: u8) -> std::io::Result<u8> {
@@ -1962,6 +2342,16 @@ pub fn num_cpus() -> usize {
     }
 }
 
+// `which` compiles its whole search for every combination of argument types
+// it's called with; going through these keeps a single copy of each.
+pub fn which(name: &OsStr) -> which::Result<PathBuf> {
+    which::which(name)
+}
+
+pub fn which_in(name: &OsStr, paths: Option<&OsStr>, cwd: &Path) -> which::Result<PathBuf> {
+    which::which_in(name, paths, cwd)
+}
+
 pub async fn retry_with_jitter<F>(limit: usize, func: F) -> std::result::Result<F::Item, F::Error>
 where
     F: tokio_retry2::Action,
@@ -1989,19 +2379,12 @@ pub trait AsyncMulticastArgs {
 #[derive(Clone)]
 pub struct AsyncMulticast<K: AsyncMulticastArgs, V> {
     run_f: Arc<dyn AsyncMulticastFunc<K, V> + Send + Sync>,
-    state: Arc<
-        Mutex<
-            HashMap<
-                K::Key,
-                tokio::sync::broadcast::Sender<std::result::Result<(K, V), Arc<anyhow::Error>>>,
-            >,
-        >,
-    >,
+    state: MulticastState,
 }
 
 impl<K, V> AsyncMulticast<K, V>
 where
-    K: AsyncMulticastArgs + Clone + Send + Sync + 'static,
+    K: AsyncMulticastArgs<Key = String> + Clone + Send + Sync + 'static,
     V: Clone + Send + Sync + 'static,
 {
     pub fn new<F>(run_f: F) -> Self
@@ -2010,18 +2393,54 @@ where
     {
         Self {
             run_f: Arc::new(run_f),
-            state: Arc::new(Mutex::new(HashMap::new())),
+            state: MulticastState::default(),
         }
     }
 
-    pub async fn call(&self, args: K) -> Result<(K, V)>
-    where
-        K::Key: Send,
-    {
-        // Lock state
-        let mut state = self.state.lock().await;
-        // Compute the key
+    pub async fn call(&self, args: K) -> Result<(K, V)> {
         let hash = args.hash();
+        let run = Box::pin({
+            let run_f = self.run_f.clone();
+            async move {
+                let val = run_f.call(&args).await?;
+                Ok(Arc::new((args, val)) as MulticastValue)
+            }
+        });
+        let res = self.state.call(hash, run).await?;
+        let (args, val) = res
+            .downcast_ref::<(K, V)>()
+            .expect("an AsyncMulticast only stores its own (K, V)");
+        Ok((args.clone(), val.clone()))
+    }
+}
+
+type MulticastValue = Arc<dyn std::any::Any + Send + Sync>;
+
+// The pending calls of an `AsyncMulticast`, with their results type-erased so
+// that the broadcast channels, the lock and the map are compiled once rather
+// than for every `AsyncMulticast<K, V>`.
+#[derive(Clone, Default)]
+struct MulticastState(
+    Arc<
+        Mutex<
+            HashMap<
+                String,
+                tokio::sync::broadcast::Sender<
+                    std::result::Result<MulticastValue, Arc<anyhow::Error>>,
+                >,
+            >,
+        >,
+    >,
+);
+
+impl MulticastState {
+    async fn call(
+        &self,
+        hash: String,
+        run: futures::future::BoxFuture<'static, Result<MulticastValue>>,
+    ) -> Result<MulticastValue> {
+        // Lock state
+        let mut state = self.0.lock().await;
 
         let mut recv = if let Some(sndr) = state.get(&hash) {
             // Return shared broadcast receiver if pending
@@ -2032,28 +2451,20 @@ where
 
             state.insert(hash.clone(), sndr);
 
-            // Run the function on a worker thread. Boxed so every `AsyncMulticast<K, V>`
-            // shares one tokio task type instead of instantiating tokio's task harness for each.
-            let task: futures::future::BoxFuture<'static, ()> = Box::pin({
-                let run_f = self.run_f.clone();
-                let state = self.state.clone();
+            // Run the function on a worker thread
+            spawn_detached({
+                let state = self.0.clone();
                 async move {
                     // Call the function
-                    let res = run_f.call(&args).await;
+                    let res = run.await;
                     // Remove the sender
                     let sndr = state.lock().await.remove(&hash);
-                    // Unwrap the result
-                    let res = match res {
-                        Ok(val) => Ok((args, val)),
-                        Err(err) => Err(Arc::new(err)),
-                    };
                     // Notify receivers
                     if let Some(sndr) = sndr {
-                        let _ = sndr.send(res);
+                        let _ = sndr.send(res.map_err(Arc::new));
                     }
                 }
             });
-            tokio::spawn(task);
 
             recv
         };
@@ -2091,18 +2502,18 @@ pub struct SimplifyPath<'a> {
 }
 
 impl SimplifyPath<'_> {
-    pub fn simplify<P: AsRef<Path>>(&mut self, path: P) -> Result<PathBuf> {
+    pub fn simplify(&mut self, path: &Path) -> Result<PathBuf> {
         use std::path::Component;
 
         let mut final_path = PathBuf::new();
-        for component in path.as_ref().components() {
+        for component in path.components() {
             match component {
                 c @ Component::RootDir | c @ Component::Prefix(_) | c @ Component::Normal(_) => {
                     final_path.push(c);
                     if self.resolved_symlinks.is_some() && final_path.is_symlink() {
                         let parent = final_path.parent().expect("symlinks have parents");
                         let link_target = final_path.read_link()?;
-                        let new_final_path = self.simplify(parent.join(&link_target))?;
+                        let new_final_path = self.simplify(&parent.join(&link_target))?;
                         let old_final_path =
                             std::mem::replace(&mut final_path, new_final_path.clone());
                         #[allow(clippy::unnecessary_unwrap)]
@@ -2265,7 +2676,7 @@ pub fn apply_basedirs_to_args<P: AsRef<Path>>(
             .map(|basedir| {
                 bytes_to_path(basedir)
                     .map_err(Into::into)
-                    .and_then(|path| paths.simplify(path))
+                    .and_then(|path| paths.simplify(&path))
                     .map(|path| diff_paths(&path, &cwd).unwrap_or(path))
                     .and_then(|path| {
                         path_to_bytes(path)
@@ -2941,6 +3352,190 @@ mod tests {
         assert!(empty_result.is_empty(), "{empty_result:?}");
     }
 
+    mod multicast {
+        use super::super::{AsyncMulticast, AsyncMulticastArgs, AsyncMulticastFunc};
+        use crate::errors::*;
+        use async_trait::async_trait;
+        use futures::{FutureExt, future::join_all};
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        use tokio::sync::Semaphore;
+
+        #[derive(Clone, Debug, PartialEq)]
+        struct Args {
+            key: &'static str,
+            caller: usize,
+            fail: bool,
+        }
+
+        impl AsyncMulticastArgs for Args {
+            type Key = String;
+            fn hash(&self) -> String {
+                self.key.to_owned()
+            }
+        }
+
+        // Counts its runs, and doesn't finish one until `release` has a permit for it.
+        struct Run {
+            runs: Arc<AtomicUsize>,
+            release: Arc<Semaphore>,
+        }
+
+        #[async_trait]
+        impl AsyncMulticastFunc<Args, usize> for Run {
+            async fn call(&self, args: &Args) -> Result<usize> {
+                let run = self.runs.fetch_add(1, Ordering::SeqCst) + 1;
+                self.release.acquire().await?.forget();
+                if args.fail {
+                    bail!("run {run} of {} failed", args.key);
+                }
+                Ok(run)
+            }
+        }
+
+        fn multicast() -> (
+            AsyncMulticast<Args, usize>,
+            Arc<AtomicUsize>,
+            Arc<Semaphore>,
+        ) {
+            let runs = Arc::new(AtomicUsize::new(0));
+            let release = Arc::new(Semaphore::new(0));
+            let multicast = AsyncMulticast::new(Run {
+                runs: runs.clone(),
+                release: release.clone(),
+            });
+            (multicast, runs, release)
+        }
+
+        fn args(key: &'static str, caller: usize, fail: bool) -> Args {
+            Args { key, caller, fail }
+        }
+
+        #[tokio::test]
+        async fn test_multicast_runs_once_per_pending_key() {
+            let (multicast, runs, release) = multicast();
+            let mut calls: Vec<_> = (0..3)
+                .map(|caller| multicast.call(args("a", caller, false)).boxed())
+                .collect();
+            calls.push(multicast.call(args("b", 3, false)).boxed());
+            // Start every call before letting any run finish.
+            for call in &mut calls {
+                assert!(futures::poll!(call).is_pending());
+            }
+            release.add_permits(2);
+            let results: Vec<_> = join_all(calls)
+                .await
+                .into_iter()
+                .map(Result::unwrap)
+                .collect();
+
+            assert_eq!(runs.load(Ordering::SeqCst), 2);
+            // Every caller of a key gets the arguments of the call that ran.
+            let (a, b) = (&results[0], &results[3]);
+            assert_eq!(a.0, args("a", 0, false));
+            assert_eq!(b.0, args("b", 3, false));
+            assert_ne!(a.1, b.1);
+            assert!(results[..3].iter().all(|result| result == a));
+        }
+
+        #[tokio::test]
+        async fn test_multicast_error_reaches_every_caller() {
+            let (multicast, runs, release) = multicast();
+            let mut calls: Vec<_> = (0..3)
+                .map(|caller| multicast.call(args("a", caller, true)).boxed())
+                .collect();
+            for call in &mut calls {
+                assert!(futures::poll!(call).is_pending());
+            }
+            release.add_permits(1);
+            for result in join_all(calls).await {
+                assert_eq!(result.unwrap_err().to_string(), "run 1 of a failed");
+            }
+            assert_eq!(runs.load(Ordering::SeqCst), 1);
+        }
+
+        #[tokio::test]
+        async fn test_multicast_runs_again_once_finished() {
+            let (multicast, runs, release) = multicast();
+            release.add_permits(2);
+            let first = multicast.call(args("a", 0, false)).await.unwrap();
+            let second = multicast.call(args("a", 1, false)).await.unwrap();
+            assert_eq!(first, (args("a", 0, false), 1));
+            assert_eq!(second, (args("a", 1, false), 2));
+            assert_eq!(runs.load(Ordering::SeqCst), 2);
+        }
+    }
+
+    // The client and server must keep agreeing on the wire format.
+    #[test]
+    fn test_bincode_serialize_matches_bincode() {
+        use crate::compiler::{CCompilerKind, ColorMode, CompilerKind, Language};
+        use crate::mock_command::ProcessOutput;
+        use crate::protocol::{Compile, CompileFinished, Request, Response};
+        use crate::server::{ServerInfo, ServerStats};
+        use std::time::Duration;
+
+        fn check<T: serde::Serialize>(value: &T) {
+            let expected = bincode::serialize(value).unwrap();
+            assert_eq!(super::bincode_serialize(value).unwrap(), expected);
+            let mut written = vec![];
+            super::bincode_serialize_into(&mut written, value).unwrap();
+            assert_eq!(written, expected);
+            let mut written = vec![];
+            bincode::serialize_into(&mut written, value).unwrap();
+            assert_eq!(written, expected);
+        }
+
+        let mut stats = ServerStats {
+            compile_requests: 3,
+            cache_write_duration: Duration::from_millis(1500),
+            ..Default::default()
+        };
+        let gcc = CompilerKind::C(CCompilerKind::Gcc);
+        stats.cache_hits.increment(&gcc, &Language::Cxx);
+        stats
+            .cache_misses
+            .increment(&CompilerKind::Rust, &Language::Rust);
+        stats.not_cached.insert("-E".into(), 2);
+        stats.dist_compiles.insert("server:10501".into(), 1);
+
+        for request in [
+            Request::Compile(Compile {
+                cwd: "/src".into(),
+                exe: "/usr/bin/gcc".into(),
+                args: vec!["-c".into(), "a.c".into()],
+                env_vars: vec![("PATH".into(), "/usr/bin".into())],
+            }),
+            Request::RecordStats(Box::new(stats.clone())),
+            Request::StoragePutRaw {
+                key: "abc".into(),
+                data: vec![0, 1, 2, 255],
+            },
+            Request::Shutdown,
+        ] {
+            check(&request);
+        }
+        for response in [
+            Response::Stats(Box::new(ServerInfo {
+                stats,
+                cache_location: "Local disk: \"/cache\"".into(),
+                cache_size: Some(1024),
+                max_cache_size: None,
+                version: "1.2.3".into(),
+                basedirs: vec!["/src".into()],
+            })),
+            Response::CompileFinished(CompileFinished {
+                color_mode: ColorMode::On,
+                output: ProcessOutput::new(1, b"out".to_vec(), b"err".to_vec()),
+            }),
+            Response::StorageGetRaw(Some(vec![7; 3])),
+        ] {
+            check(&response);
+        }
+    }
+
     #[test]
     fn test_strip_basedirs_from_arg() {
         let basedir = b"/home/user/project/".to_vec();
@@ -3308,6 +3903,209 @@ mod tests {
         let input = b"";
         let normalized = super::normalize_win_path(input);
         assert_eq!(normalized, b"");
+    }
+
+    #[tokio::test]
+    async fn test_spawn_helpers_return_task_outputs() {
+        let handle = tokio::runtime::Handle::current();
+        assert_eq!(super::spawn(async { 1u8 }).await.unwrap(), 1);
+        assert_eq!(super::spawn_on(&handle, async { 2u16 }).await.unwrap(), 2);
+        assert_eq!(
+            super::spawn_detached(async { "3".to_string() })
+                .await
+                .unwrap(),
+            "3"
+        );
+        assert_eq!(
+            super::spawn_detached_on(&handle, async { Some(4u32) })
+                .await
+                .unwrap(),
+            Some(4)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_spawn_helpers_report_panics() {
+        let task = super::spawn_detached(async { panic!("detached") });
+        let payload = task.await.unwrap_err().into_panic();
+        assert_eq!(payload.downcast_ref::<&str>(), Some(&"detached"));
+        let task = super::spawn(async { panic!("aborting") });
+        let payload = task.await.unwrap_err().into_panic();
+        assert_eq!(payload.downcast_ref::<&str>(), Some(&"aborting"));
+    }
+
+    #[tokio::test]
+    async fn test_spawn_aborts_on_drop_unless_detached() {
+        // An aborted task drops its future, and the sender with it.
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        drop(super::spawn(async move {
+            let _tx = tx;
+            std::future::pending::<()>().await;
+        }));
+        assert!(rx.await.is_err());
+
+        let task = super::spawn(std::future::pending::<()>());
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+
+        let (go_tx, go_rx) = tokio::sync::oneshot::channel::<()>();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        drop(
+            super::spawn(async move {
+                go_rx.await.unwrap();
+                tx.send(7u8).unwrap();
+            })
+            .detach(),
+        );
+        go_tx.send(()).unwrap();
+        assert_eq!(rx.await.unwrap(), 7);
+
+        let (go_tx, go_rx) = tokio::sync::oneshot::channel::<()>();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        drop(super::spawn_detached(async move {
+            go_rx.await.unwrap();
+            tx.send(8u8).unwrap();
+        }));
+        go_tx.send(()).unwrap();
+        assert_eq!(rx.await.unwrap(), 8);
+    }
+
+    #[tokio::test]
+    async fn test_spawn_blocking_helpers() {
+        let handle = tokio::runtime::Handle::current();
+        assert_eq!(super::spawn_blocking(|| vec![5u64]).await.unwrap(), vec![5]);
+        assert_eq!(
+            super::spawn_blocking_on(&handle, || Ok::<_, ()>(6i8))
+                .await
+                .unwrap(),
+            Ok(6)
+        );
+        let task: super::JoinHandle<u8> = super::spawn_blocking(|| panic!("blocking"));
+        let payload = task.await.unwrap_err().into_panic();
+        assert_eq!(payload.downcast_ref::<&str>(), Some(&"blocking"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn test_block_in_place_runs_closure() {
+        let mut calls = 0;
+        super::block_in_place(&mut || {
+            calls += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(calls, 1);
+        let err = super::block_in_place(&mut || Err(anyhow::anyhow!("failed"))).unwrap_err();
+        assert_eq!(err.to_string(), "failed");
+    }
+
+    #[test]
+    fn test_block_on_helpers() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        // The futures may borrow from the caller, and `block_on` drives the tasks they spawn.
+        let mut calls = 0;
+        let first = super::block_on(&runtime, async {
+            calls += 1;
+            tokio::spawn(async { 10u8 }).await.unwrap()
+        });
+        let second = super::block_on_handle(runtime.handle(), async {
+            calls += 1;
+            20u8
+        });
+        assert_eq!((first, second, calls), (10, 20, 2));
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            super::block_on(&runtime, async { panic!("block_on") })
+        }));
+        let payload = result.unwrap_err();
+        assert_eq!(payload.downcast_ref::<&str>(), Some(&"block_on"));
+    }
+
+    #[tokio::test]
+    async fn test_async_fs() {
+        use super::async_fs;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("a/b");
+        async_fs::create_dir_all(&dir).await.unwrap();
+        let file = dir.join("file");
+        assert!(!async_fs::try_exists(&file).await.unwrap());
+        let err = async_fs::read(&file).await.unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+
+        let mut f = async_fs::create(&file).await.unwrap();
+        f.write_all(b"data").await.unwrap();
+        f.flush().await.unwrap();
+        drop(f);
+        assert_eq!(async_fs::read_to_string(&file).await.unwrap(), "data");
+        assert!(async_fs::symlink_metadata(&file).await.unwrap().is_file());
+        let mut contents = String::new();
+        let mut f = async_fs::open(&file).await.unwrap();
+        f.read_to_string(&mut contents).await.unwrap();
+        assert_eq!(contents, "data");
+
+        assert_eq!(async_fs::copy(&file, dir.join("copy")).await.unwrap(), 4);
+        async_fs::rename(dir.join("copy"), dir.join("moved"))
+            .await
+            .unwrap();
+        assert_eq!(async_fs::read(dir.join("moved")).await.unwrap(), b"data");
+        async_fs::remove_file(&file).await.unwrap();
+        assert!(!async_fs::try_exists(&file).await.unwrap());
+        async_fs::remove_dir_all(temp.path().join("a"))
+            .await
+            .unwrap();
+        assert!(!async_fs::try_exists(temp.path().join("a")).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_join_helpers_match_futures() {
+        // Future `i` yields `i % 3` times, then fails if `i` is in `failing`.
+        fn make<I: Iterator<Item = usize>>(
+            indices: I,
+            failing: &'static [usize],
+        ) -> impl Iterator<Item = impl Future<Output = Result<usize, usize>> + Send> {
+            indices.map(move |i| async move {
+                for _ in 0..i % 3 {
+                    tokio::task::yield_now().await;
+                }
+                if failing.contains(&i) {
+                    Err(i)
+                } else {
+                    Ok(i * 2)
+                }
+            })
+        }
+
+        async fn check<I: Iterator<Item = usize>>(
+            indices: impl Fn() -> I,
+            failing: &'static [usize],
+        ) {
+            assert_eq!(
+                super::join_all(make(indices(), failing)).await,
+                futures::future::join_all(make(indices(), failing)).await,
+            );
+            assert_eq!(
+                super::try_join_all(make(indices(), failing)).await,
+                futures::future::try_join_all(make(indices(), failing)).await,
+            );
+        }
+
+        let cases: [&'static [usize]; 5] = [&[], &[1, 2], &[2, 3], &[2, 35], &[36, 1]];
+        for failing in cases {
+            check(|| 0..0, failing).await;
+            check(|| 0..4, failing).await;
+            check(|| 0..40, failing).await;
+            check(|| (0..40).filter(|i| i % 10 < 3), failing).await;
+        }
+
+        // `futures` returns the first error to happen when it knows there are at most 30
+        // futures, and the first error in order otherwise, which depends on the size hint.
+        assert_eq!(super::try_join_all(make(0..4, &[2, 3])).await, Err(3));
+        let filtered = (0..40).filter(|&i| i < 4);
+        assert_eq!(super::try_join_all(make(filtered, &[2, 3])).await, Err(2));
     }
 
     #[tokio::test]

@@ -374,7 +374,7 @@ impl Server {
 
                 let res = RunJobResponse::server_terminated(&self.server_id);
                 // Kill the jobs
-                let _ = futures::future::join_all(
+                let _ = crate::util::join_all(
                     jobs.iter()
                         .map(|job_id| self.notify_run_job_res(job_id, &res)),
                 )
@@ -479,7 +479,7 @@ impl Server {
 
     async fn poll_for_cancelled_jobs(&self) -> Result<()> {
         let cancelled_jobs =
-            futures::future::join_all(self.jobs.lock().await.keys().map(|job_id| async move {
+            crate::util::join_all(self.jobs.lock().await.keys().map(|job_id| async move {
                 self.jobs_io
                     .get_job_status(job_id)
                     .await
@@ -490,7 +490,7 @@ impl Server {
             .await;
 
         let res = RunJobResponse::job_cancelled(&self.server_id);
-        let _ = futures::future::join_all(
+        let _ = crate::util::join_all(
             cancelled_jobs
                 .iter()
                 .filter_map(|maybe_job_id| maybe_job_id.as_deref())
@@ -517,7 +517,7 @@ impl Server {
         let status = self.status_update().await;
 
         // Notify interested schedulers
-        futures::future::try_join_all(
+        crate::util::try_join_all(
             std::iter::once(self.tasks.update_status(status.clone(), None)).chain(
                 schedulers
                     .iter()
@@ -766,7 +766,7 @@ impl Server {
         let status = self.status_update().await;
 
         // Notify interested schedulers
-        futures::future::try_join_all(schedulers.iter().map(|reply_to| async {
+        crate::util::try_join_all(schedulers.iter().map(|reply_to| async {
             self.tasks
                 .job_finished(job_id, reply_to, status.clone())
                 .await
