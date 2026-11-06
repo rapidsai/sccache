@@ -557,7 +557,7 @@ mod server {
     use itertools::Itertools;
     use std::{
         collections::{BTreeMap, BTreeSet},
-        io::BufReader,
+        io::{BufReader, Write},
         path::{Path, PathBuf},
         sync::Arc,
     };
@@ -777,7 +777,8 @@ mod server {
 
             // trace!("Unpacking input files: {files:?}");
 
-            self.cache
+            let res = self
+                .cache
                 .insert_with(hash, 0, |inflated_path: &Path| {
                     let base = inflated_path.to_owned();
                     async move {
@@ -803,29 +804,69 @@ mod server {
                                 std::os::unix::fs::symlink(target, join_suffix(&base, name))?;
                             }
 
-                            let inflated_size = files
+                            let mut misses = vec![];
+
+                            let files = files
                                 .iter()
                                 .filter_map(|(path, hash)| {
-                                    inputs.get(hash).map(|data| (Path::new(path), data))
-                                })
-                                .try_fold(inflated_size, |mut inflated_size, (path, data)| {
-                                    if let Some(path) = path.parent() {
-                                        inflated_size += path.components().count() as u64 * 4096;
-                                        fs::create_dir_all(join_suffix(&base, path))?;
-                                    }
-                                    let path = join_suffix(&base, path);
-                                    let mut inflated_file = fs::OpenOptions::new()
-                                        .create(true)
-                                        .write(true)
-                                        .mode(0o755)
-                                        .truncate(true)
-                                        .open(path)?;
-                                    let mut reader = ZlibDecoder::new(data.clone());
-                                    std::io::copy(&mut reader, &mut inflated_file)
-                                        .map(|file_size| inflated_size + file_size)
-                                })?;
+                                    inputs.get(hash).map(|data| (Path::new(path), hash, data))
+                                });
 
-                            Ok(inflated_size)
+                            for (path, hash, data) in files {
+                                if let Some(path) = path.parent() {
+                                    inflated_size += path.components().count() as u64 * 4096;
+                                    fs::create_dir_all(join_suffix(&base, path))?;
+                                }
+
+                                let inflated_file = fs::OpenOptions::new()
+                                    .create(true)
+                                    .write(true)
+                                    .mode(0o755)
+                                    .truncate(true)
+                                    .open(join_suffix(&base, path))?;
+
+                                let mut inflated_file = Ok(inflated_file);
+
+                                let inflated_hash = Digest::from_reader_with_each_sync(
+                                    ZlibDecoder::new(data.clone()),
+                                    |data| {
+                                        if let Ok(file) = inflated_file.as_mut() {
+                                            match file.write_all(data) {
+                                                Ok(_) => {
+                                                    inflated_size += data.len() as u64;
+                                                }
+                                                Err(err) => {
+                                                    inflated_file = Err(err);
+                                                }
+                                            }
+                                        }
+                                    },
+                                )
+                                .map_err(std::io::Error::other)?
+                                .finish();
+
+                                if let Err(err) = inflated_file {
+                                    error!(
+                                        "Error inflating job input: path='{}', hash='{hash}', err={err:#}",
+                                        path.display()
+                                    );
+                                    misses.push(hash.clone());
+                                } else if inflated_hash.ne(hash) {
+                                    error!(
+                                        "Job input hash mismatch: path='{}' hash='{hash}'",
+                                        path.display()
+                                    );
+                                    misses.push(hash.clone());
+                                }
+                            }
+
+                            if misses.is_empty() {
+                                Ok(inflated_size)
+                            } else {
+                                Err(std::io::Error::other(RunJobError::MissingJobInputs {
+                                    inputs: misses,
+                                }))
+                            }
                         })
                         .await?
                     }
@@ -833,8 +874,23 @@ mod server {
                 .await
                 .map(|(inflated_path, _)| inflated_path)
                 .inspect_err(|err| {
-                    error!("Error unpacking files: {err:?}");
-                })
+                    error!("Error unpacking files: {err:#}");
+                });
+
+            match res {
+                Ok(res) => Ok(res),
+                Err(err) => {
+                    let io_err = match err.downcast::<std::io::Error>() {
+                        Ok(io_err) => io_err,
+                        Err(err) => return Err(err),
+                    };
+                    let job_err = match io_err.downcast::<RunJobError>() {
+                        Ok(job_err) => job_err,
+                        Err(io_err) => return Err(io_err.into()),
+                    };
+                    Err(job_err.into())
+                }
+            }
         }
 
         async fn load_file(&self, hash: String) -> Result<(String, opendal::Buffer)> {
@@ -849,15 +905,7 @@ mod server {
                         bail!("Missing input: {hash}")
                     }
                 };
-                let mut m = Digest::new();
-                for chunk in data.clone() {
-                    m.update(&chunk[..]);
-                }
-                if m.finish() != hash {
-                    bail!("Hash mismatch")
-                } else {
-                    Ok((hash, data))
-                }
+                Ok((hash, data))
             }
         }
     }
@@ -966,8 +1014,9 @@ mod server {
 
     #[cfg(test)]
     mod test {
-        use std::io::Write;
-        use std::path::Path;
+        use super::*;
+        use crate::test::{mock_storage::MockStorage, utils::Waiter};
+        use std::{io::Write, path::Path, sync::Arc};
 
         fn tar_bytes() -> Vec<u8> {
             let mut builder = tar::Builder::new(Vec::new());
@@ -1017,6 +1066,76 @@ mod server {
             fs_err::create_dir(&zlib_dst).unwrap();
             assert_eq!(super::zlib_inflate(zlib_path, &zlib_dst).unwrap(), 5);
             assert_unpacked(&zlib_dst);
+        }
+
+        #[test]
+        fn load_manifest_hash_mismatch() -> Result<()> {
+            let tempdir = tempfile::Builder::new()
+                .prefix("load_manifest_hash_mismatch")
+                .tempdir()
+                .expect("Failed to create tempdir");
+            let cache_dir = tempdir.path().join("cache");
+            std::fs::create_dir(&cache_dir).unwrap();
+
+            let jobs_cache = Arc::new(DiskCache::new(
+                &cache_dir,
+                1024 * 1024,
+                crate::config::CacheMode::ReadWrite,
+                vec![],
+            ));
+            let jobs_storage = Arc::new(MockStorage::new(None, true));
+
+            let server_inputs = ServerInputs::new(
+                jobs_cache.clone(),
+                Jobs::new(jobs_storage.clone(), Default::default()),
+            );
+
+            let bad_key = {
+                let mut m = Digest::new();
+                m.update(b"bad key");
+                m.finish()
+            };
+
+            let src_file = b"source file";
+
+            let real_key = {
+                let mut m = Digest::new();
+                m.update(src_file);
+                m.finish()
+            };
+
+            jobs_cache.put(&bad_key, src_file.to_vec().into()).wait()?;
+
+            let res = server_inputs
+                .load_manifest(
+                    "",
+                    vec![],
+                    [("source_file.c".into(), real_key.clone())]
+                        .into_iter()
+                        .collect(),
+                    Default::default(),
+                )
+                .wait();
+
+            match res {
+                Ok(res) => {
+                    panic!("res: {res:?}");
+                }
+                Err(err) => match err.downcast::<RunJobError>() {
+                    Ok(err) => match err {
+                        RunJobError::MissingJobInputs { inputs } => {
+                            assert_eq!(inputs, vec![real_key.clone()]);
+                            Ok(())
+                        }
+                        err => {
+                            panic!("err: {err:?}");
+                        }
+                    },
+                    Err(err) => {
+                        panic!("err: {err:?}");
+                    }
+                },
+            }
         }
     }
 }

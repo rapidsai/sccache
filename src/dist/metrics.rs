@@ -503,6 +503,12 @@ pub struct JobsMetrics {
     m_names: BTreeMap<&'static str, Cow<'static, str>>,
 }
 
+impl Default for JobsMetrics {
+    fn default() -> Self {
+        Self::new("sccache", Default::default())
+    }
+}
+
 impl JobsMetrics {
     pub fn new(prefix: &str, metrics: Metrics) -> Self {
         use metrics::Unit::{Count, Seconds};

@@ -133,6 +133,15 @@ impl Digest {
             .await
     }
 
+    /// Calculate the BLAKE3 digest of the contents read from `reader`, calling
+    /// `each` before each time the digest is updated.
+    pub fn from_reader_with_each_sync<R: Read + Send, F: FnMut(&[u8])>(
+        reader: R,
+        each: F,
+    ) -> Result<Self> {
+        Digest::new().with_reader_each_sync(reader, each)
+    }
+
     /// Calculate the BLAKE3 digest of the contents read from `reader`, while
     /// also checking for the presence of time macros.
     /// See [`TimeMacroFinder`] for more details.
