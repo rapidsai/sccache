@@ -549,7 +549,7 @@ mod server {
             metrics::ToolchainsMetrics,
         },
         errors::*,
-        util::{AsyncMulticast, AsyncMulticastArgs, AsyncMulticastFunc},
+        util::{AsyncMulticast, AsyncMulticastArgs, AsyncMulticastFunc, Digest},
     };
     use async_trait::async_trait;
     use flate2::bufread::{MultiGzDecoder as GzipDecoder, ZlibDecoder};
@@ -849,7 +849,15 @@ mod server {
                         bail!("Missing input: {hash}")
                     }
                 };
-                Ok((hash, data))
+                let mut m = Digest::new();
+                for chunk in data.clone() {
+                    m.update(&chunk[..]);
+                }
+                if m.finish() != hash {
+                    bail!("Hash mismatch")
+                } else {
+                    Ok((hash, data))
+                }
             }
         }
     }
