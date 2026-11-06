@@ -700,6 +700,15 @@ impl<T: CommandCreatorSync> dyn CompilerHasher<T> {
             }
         );
 
+        let dist_cache_control = if env_vars.iter().any(|(k, v)| {
+            k == "SCCACHE_RECACHE_DIST_INPUTS"
+                && matches!(v.to_str().unwrap_or_default(), "true" | "on" | "1")
+        }) {
+            CacheControl::ForceRecache
+        } else {
+            CacheControl::Default
+        };
+
         let dist_client = dist_client.filter(|_| {
             // Clients might want to set this when configuring
             // so e.g. the CMake compiler checks execute locally
@@ -756,6 +765,7 @@ impl<T: CommandCreatorSync> dyn CompilerHasher<T> {
         // Instance to perform the cache lookup and prepare to compile
         let lookup_or_compile = CacheLookupOrCompile::new(
             cache_control,
+            dist_cache_control,
             &creator,
             hash_result,
             &cwd,
@@ -893,6 +903,7 @@ impl<T: CommandCreatorSync> dyn CompilerHasher<T> {
 
 struct CacheLookupOrCompile<'a, T: CommandCreatorSync> {
     cache_control: CacheControl,
+    dist_cache_control: CacheControl,
     command_creator: &'a T,
     compilation: Box<dyn Compilation<T>>,
     dist_client: Option<Arc<dyn dist::Client>>,
@@ -911,6 +922,7 @@ where
     #[allow(clippy::too_many_arguments)]
     fn new(
         cache_control: CacheControl,
+        dist_cache_control: CacheControl,
         command_creator: &'a T,
         compilation: HashResult<T>,
         cwd: &Path,
@@ -958,6 +970,7 @@ where
 
         Self {
             cache_control,
+            dist_cache_control,
             command_creator,
             compilation,
             dist_client,
@@ -1044,7 +1057,7 @@ where
     #[cfg(feature = "dist-client")]
     fn into_compile(self) -> Result<Compile<'a, T>> {
         let Self {
-            cache_control,
+            dist_cache_control,
             command_creator,
             compilation,
             dist_client,
@@ -1062,7 +1075,7 @@ where
 
         let dist = dist_client.and_then(|dist_client| {
             dist_compile_cmd.map(|dist_compile_cmd| DistCompile {
-                cache_control,
+                cache_control: dist_cache_control,
                 compilation,
                 dist_client,
                 dist_compile_cmd,
@@ -4983,7 +4996,7 @@ mod test_dist {
             unreachable!()
         }
         async fn put_job(&self, _: HashMap<String, JobInput>) -> Result<()> {
-            Ok(())
+            unreachable!()
         }
         async fn del_job(&self, _: &str) -> Result<()> {
             Ok(())
@@ -5159,7 +5172,7 @@ mod test_dist {
             })
         }
         async fn put_job(&self, _: HashMap<String, JobInput>) -> Result<()> {
-            Ok(())
+            unreachable!()
         }
         async fn del_job(&self, _: &str) -> Result<()> {
             Ok(())
@@ -5255,7 +5268,7 @@ mod test_dist {
             })
         }
         async fn put_job(&self, _: HashMap<String, JobInput>) -> Result<()> {
-            Ok(())
+            unreachable!()
         }
         async fn del_job(&self, _: &str) -> Result<()> {
             Ok(())
