@@ -1044,6 +1044,7 @@ where
     #[cfg(feature = "dist-client")]
     fn into_compile(self) -> Result<Compile<'a, T>> {
         let Self {
+            cache_control,
             command_creator,
             compilation,
             dist_client,
@@ -1061,6 +1062,7 @@ where
 
         let dist = dist_client.and_then(|dist_client| {
             dist_compile_cmd.map(|dist_compile_cmd| DistCompile {
+                cache_control,
                 compilation,
                 dist_client,
                 dist_compile_cmd,
@@ -1316,6 +1318,7 @@ struct LocalCompile<T: CommandCreatorSync> {
 }
 
 struct DistCompile<T: CommandCreatorSync> {
+    cache_control: CacheControl,
     compilation: Box<dyn Compilation<T>>,
     dist_client: Arc<dyn dist::Client>,
     dist_compile_cmd: dist::CompileCommand,
@@ -1342,6 +1345,7 @@ where
         use tokio_retry2::strategy::FibonacciBackoff;
 
         let Self {
+            cache_control,
             compilation,
             dist_client,
             dist_compile_cmd,
@@ -1482,16 +1486,17 @@ where
 
                 trace!("[{out_pretty}]: Requesting job allocation");
 
+                missing_inputs = hashed_inputs.keys().cloned().collect();
+
                 match dist_client
-                    .new_job(
-                        dist_toolchain.clone(),
-                        hashed_inputs.keys().cloned().collect(),
-                    )
+                    .new_job(dist_toolchain.clone(), missing_inputs.clone())
                     .await
                 {
                     Ok(res) => {
                         trace!("[{out_pretty}, {}]: Received job allocation", res.job_id);
-                        missing_inputs = res.missing_inputs;
+                        if !matches!(cache_control, CacheControl::ForceRecache) {
+                            missing_inputs = res.missing_inputs;
+                        }
                         has_toolchain = res.has_toolchain;
                         job = Some((res.job_id, res.timeout.min(dist_client.request_timeout())));
                         continue;
@@ -4978,7 +4983,7 @@ mod test_dist {
             unreachable!()
         }
         async fn put_job(&self, _: HashMap<String, JobInput>) -> Result<()> {
-            unreachable!()
+            Ok(())
         }
         async fn del_job(&self, _: &str) -> Result<()> {
             Ok(())
@@ -5154,7 +5159,7 @@ mod test_dist {
             })
         }
         async fn put_job(&self, _: HashMap<String, JobInput>) -> Result<()> {
-            unreachable!()
+            Ok(())
         }
         async fn del_job(&self, _: &str) -> Result<()> {
             Ok(())
@@ -5250,7 +5255,7 @@ mod test_dist {
             })
         }
         async fn put_job(&self, _: HashMap<String, JobInput>) -> Result<()> {
-            unreachable!()
+            Ok(())
         }
         async fn del_job(&self, _: &str) -> Result<()> {
             Ok(())
