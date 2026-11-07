@@ -305,7 +305,7 @@ impl SourceFileCache {
 // different.
 
 /// An 8 byte magic string denoting the version of the [`SourceFileDeps`] struct encoding.
-pub const DEPS_VERSION: &[u8] = b"rapids_1";
+pub const DEPS_VERSION: &[u8] = b"rapids_2";
 const MAX_REVISIONS: u64 = 1_000;
 
 #[derive(Clone, Default, Deserialize, Serialize, Debug, PartialEq, Eq)]
