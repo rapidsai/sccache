@@ -11,7 +11,8 @@ if test "${#old_containers[*]}" -gt 0; then
     docker rm -f "${old_containers[@]}" 2>/dev/null || true;
 fi
 
-sudo rm -rf /tmp/sccache_*.txt /tmp/sccache /tmp/sccache_system_test* /tmp/sccache_dist/*/{dist,test}*
+mkdir -p /tmp/sccache
+sudo rm -rf /tmp/sccache_*.txt /tmp/sccache/* /tmp/sccache_system_test* /tmp/sccache_dist/*/{dist,test}*
 
 if test $# -eq 0; then
     set -- dist::

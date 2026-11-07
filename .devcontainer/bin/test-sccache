@@ -6,7 +6,8 @@ cd "${SCCACHE_REPO:-$(pwd)}"
 
 sudo pkill -9 sccache || true
 
-sudo rm -rf /tmp/sccache_*.txt /tmp/sccache /tmp/sccache_system_test* /tmp/sccache_dist/*/{dist,test}*
+mkdir -p /tmp/sccache
+sudo rm -rf /tmp/sccache_*.txt /tmp/sccache/* /tmp/sccache_system_test* /tmp/sccache_dist/*/{dist,test}*
 
 if ! test -n "${RUST_BACKTRACE:+x}"; then
     RUST_BACKTRACE="1"
