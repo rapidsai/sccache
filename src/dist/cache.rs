@@ -663,7 +663,7 @@ mod server {
             self.load(inputs.clone(), outputs.to_vec())
                 .await
                 .inspect_err(|err| {
-                    error!("Error loading inputs: {err:?}");
+                    tracing::error!("Error loading inputs: {err:?}");
                 })
         }
     }
@@ -728,7 +728,7 @@ mod server {
                 .await
                 .map(|(path, _)| path)
                 .inspect_err(|err| {
-                    error!("Error unpacking inputs: {err:?}");
+                    tracing::error!("Error unpacking inputs: {err:?}");
                 })
         }
 
@@ -746,7 +746,7 @@ mod server {
             let (misses, inputs) =
                 crate::util::join_all(files.values().unique().cloned().map(|hash| async move {
                     self.load_file(hash.clone()).await.map_err(|err| {
-                        error!("Error loading input file: {err:?}");
+                        tracing::error!("Error loading input file: {err:?}");
                         hash
                     })
                 }))
@@ -768,14 +768,14 @@ mod server {
                 );
 
             if !misses.is_empty() {
-                // error!("Misses: {misses:?}");
+                // tracing::error!("Misses: {misses:?}");
                 return Err(RunJobError::MissingJobInputs {
                     inputs: misses.into_iter().collect(),
                 }
                 .into());
             }
 
-            // trace!("Unpacking input files: {files:?}");
+            // tracing::trace!("Unpacking input files: {files:?}");
 
             let res = self
                 .cache
@@ -846,13 +846,13 @@ mod server {
                                 .finish();
 
                                 if let Err(err) = inflated_file {
-                                    error!(
+                                    tracing::error!(
                                         "Error inflating job input: path='{}', hash='{hash}', err={err:#}",
                                         path.display()
                                     );
                                     misses.push(hash.clone());
                                 } else if inflated_hash.ne(hash) {
-                                    error!(
+                                    tracing::error!(
                                         "Job input hash mismatch: path='{}' hash='{hash}'",
                                         path.display()
                                     );
@@ -874,7 +874,7 @@ mod server {
                 .await
                 .map(|(inflated_path, _)| inflated_path)
                 .inspect_err(|err| {
-                    error!("Error unpacking files: {err:#}");
+                    tracing::error!("Error unpacking files: {err:#}");
                 });
 
             match res {
