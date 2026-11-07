@@ -1470,13 +1470,12 @@ fn create_nvcc_commands_graph(
                                     NvccSubcommandKind::Preprocess,
                                     group,
                                     parsed_args,
-                                    env_vars.clone(),
-                                    // // Don't cache the preprocessor output
-                                    // env_vars
-                                    //     .iter()
-                                    //     .chain(&[("SCCACHE_NO_CACHE".into(), "1".into())])
-                                    //     .cloned()
-                                    //     .collect::<Vec<_>>(),
+                                    // Don't cache the preprocessor output
+                                    env_vars
+                                        .iter()
+                                        .chain(&[("SCCACHE_NO_CACHE".into(), "1".into())])
+                                        .cloned()
+                                        .collect::<Vec<_>>(),
                                     vec![],
                                 )
                             } else if compile_flag == &NvccCompileFlag::Executable {
