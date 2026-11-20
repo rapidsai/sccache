@@ -61,7 +61,7 @@ use std::{
 use tokio::{
     io::{AsyncRead, AsyncWrite},
     runtime::Runtime,
-    sync::{Mutex, RwLock},
+    sync::{Mutex, Notify, RwLock},
     time::{self, Sleep, sleep},
 };
 use tokio_serde::Framed;
@@ -889,7 +889,13 @@ impl util::AsyncMulticastArgs for Compile {
 
 #[derive(Clone, Default)]
 pub struct SccacheGauge {
-    value: Arc<AtomicU64>,
+    value: Arc<SccacheGaugeState>,
+}
+
+#[derive(Default)]
+struct SccacheGaugeState {
+    count: AtomicU64,
+    decremented: Notify,
 }
 
 impl SccacheGauge {
@@ -907,6 +913,7 @@ impl SccacheGauge {
         let value = self.value.clone();
         #[allow(deprecated)]
         value
+            .count
             .fetch_update(
                 std::sync::atomic::Ordering::SeqCst,
                 std::sync::atomic::Ordering::SeqCst,
@@ -921,24 +928,38 @@ impl SccacheGauge {
             .map(|_| SccacheGaugeIncrement { value })
     }
 
+    async fn increment_below(&self, limit: u64) -> SccacheGaugeIncrement {
+        loop {
+            let available = self.value.decremented.notified();
+            tokio::pin!(available);
+            // Register before checking the counter so releases cannot be missed or coalesced.
+            available.as_mut().enable();
+            if let Ok(pending) = self.increment_if(|count| count < limit) {
+                return pending;
+            }
+            available.await;
+        }
+    }
+
     pub fn value(&self) -> u64 {
-        self.value.load(std::sync::atomic::Ordering::SeqCst)
+        self.value.count.load(std::sync::atomic::Ordering::SeqCst)
     }
 }
 
 #[derive(Clone, Default)]
 pub struct SccacheGaugeIncrement {
-    value: Arc<AtomicU64>,
+    value: Arc<SccacheGaugeState>,
 }
 
 impl Drop for SccacheGaugeIncrement {
     fn drop(&mut self) {
         #[allow(deprecated)]
-        let _ = self.value.fetch_update(
+        let _ = self.value.count.fetch_update(
             std::sync::atomic::Ordering::SeqCst,
             std::sync::atomic::Ordering::SeqCst,
             |value| Some(value.saturating_sub(1)),
         );
+        self.value.decremented.notify_one();
     }
 }
 
@@ -1027,24 +1048,9 @@ where
     }
 
     pub async fn increment_pending_compilations_guarded(&self) -> SccacheGaugeIncrement {
-        loop {
-            match self
-                .pending_compilations
-                .increment_if(|pending_compilations| {
-                    pending_compilations < self.pending_compilations_limit
-                }) {
-                Ok(pending) => {
-                    break pending;
-                }
-                Err(_) => {
-                    // Jitter so not every task retries at the same time
-                    tokio::time::sleep(tokio_retry2::strategy::jitter_range(0.0, 5.0)(
-                        Duration::from_secs(1),
-                    ))
-                    .await;
-                }
-            }
-        }
+        self.pending_compilations
+            .increment_below(self.pending_compilations_limit)
+            .await
     }
 
     pub fn pending_cache_lookups(&self) -> u64 {
@@ -2884,6 +2890,105 @@ fn waits_until_zero() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn admission_wakes_on_release() {
+        let gauge = SccacheGauge::default();
+        let held = gauge.increment();
+        let waiting = gauge.increment_below(1);
+        tokio::pin!(waiting);
+        assert!(futures::poll!(&mut waiting).is_pending());
+        drop(held);
+        let Poll::Ready(admitted) = futures::poll!(&mut waiting) else {
+            panic!("release did not wake admission immediately");
+        };
+        assert_eq!(gauge.value(), 1);
+        drop(admitted);
+        assert_eq!(gauge.value(), 0);
+    }
+
+    #[tokio::test]
+    async fn admission_wakes_multiple_waiters() {
+        let gauge = SccacheGauge::default();
+        let held = [gauge.increment(), gauge.increment()];
+        let first = gauge.increment_below(2);
+        let second = gauge.increment_below(2);
+        let third = gauge.increment_below(2);
+        tokio::pin!(first, second, third);
+        assert!(futures::poll!(&mut first).is_pending());
+        assert!(futures::poll!(&mut second).is_pending());
+        assert!(futures::poll!(&mut third).is_pending());
+        drop(held);
+        let Poll::Ready(one) = futures::poll!(&mut first) else {
+            panic!("first released slot was lost");
+        };
+        let Poll::Ready(two) = futures::poll!(&mut second) else {
+            panic!("second released slot was lost");
+        };
+        assert!(futures::poll!(&mut third).is_pending());
+        assert_eq!(gauge.value(), 2);
+        drop(one);
+        let Poll::Ready(three) = futures::poll!(&mut third) else {
+            panic!("remaining waiter did not wake");
+        };
+        drop((two, three));
+        assert_eq!(gauge.value(), 0);
+    }
+
+    #[tokio::test]
+    async fn admission_cancelled_waiter_passes_wakeup() {
+        let gauge = SccacheGauge::default();
+        let held = gauge.increment();
+        let mut first = Box::pin(gauge.increment_below(1));
+        let mut second = Box::pin(gauge.increment_below(1));
+        assert!(futures::poll!(&mut first).is_pending());
+        assert!(futures::poll!(&mut second).is_pending());
+        drop(held);
+        drop(first);
+        assert!(futures::poll!(&mut second).is_ready());
+        assert_eq!(gauge.value(), 0);
+    }
+
+    #[tokio::test]
+    async fn admission_preserves_unbounded_nested_work() {
+        let gauge = SccacheGauge::default();
+        let outer = gauge.increment_below(1).await;
+        let nested = gauge.increment();
+        assert_eq!(gauge.value(), 2);
+        let waiting = gauge.increment_below(1);
+        tokio::pin!(waiting);
+        assert!(futures::poll!(&mut waiting).is_pending());
+        drop(outer);
+        assert!(futures::poll!(&mut waiting).is_pending());
+        drop(nested);
+        assert!(futures::poll!(&mut waiting).is_ready());
+        assert_eq!(gauge.value(), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn admission_concurrent_progress() {
+        let gauge = SccacheGauge::default();
+        let tasks: Vec<_> = (0..256)
+            .map(|_| {
+                let gauge = gauge.clone();
+                tokio::spawn(async move {
+                    for _ in 0..10 {
+                        let _held = gauge.increment_below(4).await;
+                        assert!(gauge.value() <= 4);
+                        tokio::task::yield_now().await;
+                    }
+                })
+            })
+            .collect();
+        tokio::time::timeout(Duration::from_secs(60), async {
+            for task in tasks {
+                task.await.unwrap();
+            }
+        })
+        .await
+        .expect("admission lost a wakeup");
+        assert_eq!(gauge.value(), 0);
+    }
 
     struct StringWriter {
         buffer: String,
