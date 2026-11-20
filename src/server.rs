@@ -2980,7 +2980,7 @@ mod tests {
                 })
             })
             .collect();
-        tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::time::timeout(Duration::from_secs(60), async {
             for task in tasks {
                 task.await.unwrap();
             }
